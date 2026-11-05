@@ -1,0 +1,36 @@
+modules:
+  confluence:globalPage:
+    - key: minerva-adr-forge-hello-world-global-page
+      resource: main
+      render: native
+      resolver:
+        function: resolver
+      title: Minerva-ADR-Forge
+      route: hello-world
+
+  function:
+    - key: resolver
+      handler: index.handler
+
+    - key: run-migration
+      handler: index.runMigration
+
+  scheduledTrigger:
+    - key: sql-schema-migration
+      function: run-migration
+      interval: fiveMinute
+
+  sql:
+    - key: minerva-adr-sql
+      engine: mysql
+
+resources:
+  - key: main
+    path: src/frontend/index.jsx
+
+app:
+  runtime:
+    name: nodejs24.x
+    memoryMB: 256
+    architecture: arm64
+  id: ari:cloud:ecosystem::app/0956bba1-12a7-4958-a0f4-2c10045f3726
