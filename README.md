@@ -75,7 +75,7 @@ forge deploy --non-interactive --environment development
 ## Estado del proyecto
 
 En desarrollo. La integración automática con Google Drive está
-planificada.
+planificada. Se requieren permisos en workspace de Google.
 
 ## Licencia
 
