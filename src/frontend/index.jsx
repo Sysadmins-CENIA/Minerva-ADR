@@ -1,5 +1,10 @@
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useState,
+} from 'react';
+
 import ForgeReconciler, {
   Box,
   Button,
@@ -15,9 +20,16 @@ import ForgeReconciler, {
   TextArea,
   Select,
 } from '@forge/react';
+
 import { invoke } from '@forge/bridge';
 
 const PAGE_SIZE = 10;
+
+const REVIEW_STATUSES = [
+  { label: 'Pendiente de revisión', value: 'Pendiente de revisión' },
+  { label: 'Validado', value: 'Validado' },
+  { label: 'Descartado', value: 'Descartado' },
+];
 
 const DECISION_STATUSES = [
   { label: 'Propuesto', value: 'Propuesto' },
@@ -27,30 +39,14 @@ const DECISION_STATUSES = [
   { label: 'Obsoleta', value: 'Obsoleta' },
 ];
 
-const REVIEW_STATUSES = [
-  { label: 'Pendiente de revisión', value: 'Pendiente de revisión' },
-  { label: 'Validado', value: 'Validado' },
-  { label: 'Descartado', value: 'Descartado' },
-];
-
-const REVIEW_FILTERS = [
+const FILTERS = [
   { label: 'Todos', value: 'all' },
-  { label: 'Por revisar', value: 'Pendiente de revisión' },
+  { label: 'Pendientes', value: 'Pendiente de revisión' },
   { label: 'Validados', value: 'Validado' },
   { label: 'Descartados', value: 'Descartado' },
 ];
 
-const EMPTY_EDIT_FORM = {
-  title: '',
-  decision: '',
-  context: '',
-  job: '',
-  decision_owner: '',
-  status: 'Propuesto',
-  review_status: 'Pendiente de revisión',
-};
-
-const EMPTY_MANUAL_FORM = {
+const EMPTY_FORM = {
   title: '',
   decision: '',
   context: '',
@@ -60,1343 +56,2089 @@ const EMPTY_MANUAL_FORM = {
   source_reference: '',
 };
 
+const EMPTY_EDIT = {
+  title: '',
+  decision: '',
+  context: '',
+  job: '',
+  decision_owner: '',
+  status: 'Propuesto',
+  review_status: 'Pendiente de revisión',
+};
+
+const errorMessage = (error) =>
+  error?.message || 'Ocurrió un error desconocido.';
+
+const reviewAppearance = (value) => {
+  if (value === 'Validado') return 'success';
+  if (value === 'Descartado') return 'removed';
+  return 'inprogress';
+};
+
+const decisionAppearance = (value) => {
+  if (value === 'Aprobada') return 'success';
+  if (value === 'Rechazada') return 'removed';
+  if (value === 'En discusión') return 'inprogress';
+  return 'default';
+};
+
+const formatDate = (value) => {
+  if (!value) return '';
+  return String(value).slice(0, 10);
+};
+
+const Field = ({
+  label,
+  value,
+  onChange,
+  multiline = false,
+  placeholder = '',
+}) => (
+  <Stack space="space.050">
+    <Text weight="semibold">{label}</Text>
+    {multiline ? (
+      <TextArea
+        value={value || ''}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+      />
+    ) : (
+      <Textfield
+        value={value || ''}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+      />
+    )}
+  </Stack>
+);
+
 const App = () => {
-  const [candidates, setCandidates] = useState([]);
-  const [archivedCandidates, setArchivedCandidates] = useState([]);
 
-  const [loading, setLoading] = useState(true);
-  const [archivedLoading, setArchivedLoading] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [updating, setUpdating] = useState(null);
-  const [creatingManual, setCreatingManual] = useState(false);
+  // ==========================================================
+  // NAVEGACIÓN
+  // ==========================================================
 
-  const [error, setError] = useState(null);
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [importResult, setImportResult] = useState(null);
-
+  const [view, setView] = useState('decisions');
   const [activeView, setActiveView] = useState('active');
   const [reviewFilter, setReviewFilter] = useState('all');
   const [currentPage, setCurrentPage] = useState(1);
+  const [expandedId, setExpandedId] = useState(null);
 
+  // ==========================================================
+  // ESTADO GENERAL
+  // ==========================================================
+
+  const [candidates, setCandidates] = useState([]);
+  const [archivedCandidates, setArchivedCandidates] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(null);
+
+  // ==========================================================
+  // FORMULARIOS
+  // ==========================================================
+
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [importResult, setImportResult] = useState(null);
+  const [manualForm, setManualForm] = useState(EMPTY_FORM);
+
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState(EMPTY_EDIT);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
-  const [editingCandidateId, setEditingCandidateId] = useState(null);
-  const [editForm, setEditForm] = useState(EMPTY_EDIT_FORM);
 
-  const [showManualForm, setShowManualForm] = useState(false);
-  const [manualForm, setManualForm] = useState(EMPTY_MANUAL_FORM);
+  // ==========================================================
+  // GOOGLE
+  // ==========================================================
 
-  // Consulta los candidatos activos.
-  const loadCandidates = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const [googleAccount, setGoogleAccount] = useState(null);
+  const [googleLoading, setGoogleLoading] = useState(true);
+  const [googleConnecting, setGoogleConnecting] = useState(false);
+  const [googleError, setGoogleError] = useState(null);
 
+  const [savedDriveFolder, setSavedDriveFolder] = useState(null);
+  const [driveConfigLoading, setDriveConfigLoading] = useState(true);
+  const [driveSaving, setDriveSaving] = useState(false);
+
+  const [showDriveSettings, setShowDriveSettings] = useState(false);
+  const [preferredFolders, setPreferredFolders] = useState([]);
+  const [preferredLoading, setPreferredLoading] = useState(false);
+
+  const [driveQuery, setDriveQuery] = useState('');
+  const [driveMatches, setDriveMatches] = useState([]);
+  const [driveSearching, setDriveSearching] = useState(false);
+
+  const [selectedDriveFolder, setSelectedDriveFolder] = useState(null);
+  const [drivePreview, setDrivePreview] = useState(null);
+  const [drivePreviewLoading, setDrivePreviewLoading] = useState(false);
+  const [driveError, setDriveError] = useState(null);
+  const [driveNotice, setDriveNotice] = useState(null);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncResult, setSyncResult] = useState(null);
+  const [syncError, setSyncError] = useState(null);
+
+  // ==========================================================
+  // CARGA DE CANDIDATOS
+  // ==========================================================
+
+  const refreshCandidates = useCallback(async () => {
     try {
-      const result = await invoke('getCandidates');
+      const [active, archived] = await Promise.all([
+        invoke('getCandidates'),
+        invoke('getArchivedCandidates'),
+      ]);
 
-      if (!result?.success) {
-        throw new Error('La consulta no pudo completarse.');
+      if (!active?.success || !archived?.success) {
+        throw new Error('No se pudieron cargar las decisiones.');
       }
 
-      setCandidates(result.candidates ?? []);
+      setCandidates(active.candidates || []);
+      setArchivedCandidates(archived.candidates || []);
     } catch (err) {
-      console.error('[Minerva ADR] Error al cargar candidatos:', err);
-      setError('No fue posible cargar los candidatos ADR.');
+      setError(errorMessage(err));
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // Consulta los candidatos archivados.
-  const loadArchivedCandidates = useCallback(async () => {
-    setArchivedLoading(true);
+  // ==========================================================
+  // GOOGLE - CARGA INICIAL
+  // ==========================================================
+
+  const loadGoogleAccount = useCallback(async () => {
+    setGoogleLoading(true);
 
     try {
-      const result = await invoke('getArchivedCandidates');
+      const result = await invoke('getGoogleAccount');
 
-      if (!result?.success) {
-        throw new Error('La consulta no pudo completarse.');
-      }
-
-      setArchivedCandidates(result.candidates ?? []);
+      setGoogleAccount(
+        result?.connected ? result.account : null
+      );
+      setGoogleError(null);
     } catch (err) {
-      console.error('[Minerva ADR] Error al cargar archivados:', err);
-      setError('No fue posible cargar las decisiones archivadas.');
+      setGoogleAccount(null);
+      setGoogleError(errorMessage(err));
     } finally {
-      setArchivedLoading(false);
+      setGoogleLoading(false);
     }
   }, []);
 
-  // Actualiza ambas vistas.
-  const refreshData = useCallback(async () => {
-    await Promise.all([
-      loadCandidates(),
-      loadArchivedCandidates(),
-    ]);
-  }, [loadCandidates, loadArchivedCandidates]);
+  const loadDriveConfig = useCallback(async () => {
+    setDriveConfigLoading(true);
 
-  // Selección de minuta.
-  const handleFileChange = useCallback((files) => {
-    setSelectedFile(null);
-    setImportResult(null);
-    setError(null);
+    try {
+      const result = await invoke('getDriveFolderConfig');
 
-    if (!files || files.length === 0) return;
+      if (!result?.success) {
+        throw new Error('No se pudo recuperar la configuración.');
+      }
 
-    const file = files[0];
+      const folder = result.configured
+        ? result.folder
+        : null;
 
-    if (!file.name.toLowerCase().endsWith('.md')) {
-      setError('Selecciona un archivo con extensión .md.');
+      setSavedDriveFolder(folder);
+      setSelectedDriveFolder((previous) => previous || folder);
+    } catch (err) {
+      setDriveError(errorMessage(err));
+    } finally {
+      setDriveConfigLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshCandidates();
+    loadGoogleAccount();
+    loadDriveConfig();
+  }, [
+    refreshCandidates,
+    loadGoogleAccount,
+    loadDriveConfig,
+  ]);
+
+  // ==========================================================
+  // GOOGLE - ACCIONES
+  // ==========================================================
+
+  const handleConnectGoogle = async () => {
+    setGoogleConnecting(true);
+    setGoogleError(null);
+
+    try {
+      const result = await invoke('connectGoogle');
+
+      if (result?.connected && result.account) {
+        setGoogleAccount(result.account);
+      } else {
+        await loadGoogleAccount();
+      }
+    } catch (err) {
+      if (err?.name === 'NEEDS_AUTHENTICATION_ERR') {
+        throw err;
+      }
+      setGoogleError(errorMessage(err));
+    } finally {
+      setGoogleConnecting(false);
+    }
+  };
+
+  const loadPreferredFolders = async () => {
+    setPreferredLoading(true);
+    setDriveError(null);
+
+    try {
+      const result = await invoke('getPreferredDriveFolders');
+
+      if (!result?.success) {
+        throw new Error('No se encontraron las carpetas.');
+      }
+
+      setPreferredFolders(result.folders || []);
+    } catch (err) {
+      setDriveError(errorMessage(err));
+    } finally {
+      setPreferredLoading(false);
+    }
+  };
+
+  const handleToggleDriveSettings = () => {
+    if (!showDriveSettings && googleAccount) {
+      loadPreferredFolders();
+    }
+
+    setShowDriveSettings(!showDriveSettings);
+  };
+
+  const handleSearchFolders = async () => {
+    const query = driveQuery.trim();
+
+    if (query.length < 2) {
+      setDriveError('Escribe al menos dos caracteres.');
       return;
     }
 
-    setSelectedFile(file);
-  }, []);
+    setDriveSearching(true);
+    setDriveMatches([]);
+    setDriveError(null);
 
-  // Importación de minuta.
-  const handleImport = useCallback(async () => {
-    if (!selectedFile || importing) return;
+    try {
+      const result = await invoke(
+        'searchDriveFolders',
+        { query }
+      );
 
-    setImporting(true);
+      if (!result?.success) {
+        throw new Error('No se pudo buscar la carpeta.');
+      }
+
+      setDriveMatches(result.folders || []);
+    } catch (err) {
+      setDriveError(errorMessage(err));
+    } finally {
+      setDriveSearching(false);
+    }
+  };
+
+  const handleSelectFolder = async (folder) => {
+    setSelectedDriveFolder(folder);
+    setDrivePreview(null);
+    setDriveError(null);
+    setDriveNotice(null);
+    setDrivePreviewLoading(true);
+
+    try {
+      const result = await invoke(
+        'previewDriveFolder',
+        { folderId: folder.id }
+      );
+
+      if (!result?.success) {
+        throw new Error('No se pudo explorar la carpeta.');
+      }
+
+      setDrivePreview(result);
+    } catch (err) {
+      setDriveError(errorMessage(err));
+    } finally {
+      setDrivePreviewLoading(false);
+    }
+  };
+
+  const handleSaveFolder = async () => {
+    if (!selectedDriveFolder?.id || !drivePreview) {
+      setDriveError('Selecciona y explora una carpeta válida.');
+      return;
+    }
+
+    setDriveSaving(true);
+    setDriveError(null);
+    setDriveNotice(null);
+
+    try {
+      const result = await invoke(
+        'saveDriveFolderConfig',
+        { folderId: selectedDriveFolder.id }
+      );
+
+      if (!result?.success || !result.folder) {
+        throw new Error('No se pudo guardar la carpeta.');
+      }
+
+      setSavedDriveFolder(result.folder);
+      setSelectedDriveFolder(result.folder);
+      setDriveNotice('Carpeta guardada correctamente.');
+    } catch (err) {
+      setDriveError(errorMessage(err));
+    } finally {
+      setDriveSaving(false);
+    }
+  };
+
+
+  // ==========================================================
+  // GOOGLE DRIVE - SINCRONIZACIÓN MANUAL
+  // ==========================================================
+
+  const handleSyncDrive = async (reprocess = false) => {
+    if (syncLoading || !savedDriveFolder) {
+      return;
+    }
+
+    setSyncLoading(true);
+    setSyncResult(null);
+    setSyncError(null);
+    setError(null);
+
+    try {
+      const result = await invoke('syncDriveMarkdown', {
+        reprocess,
+      });
+
+      if (!result?.success) {
+        throw new Error(
+          'No fue posible completar la sincronización.'
+        );
+      }
+
+      setSyncResult(result);
+      await refreshCandidates();
+    } catch (err) {
+      setSyncError(errorMessage(err));
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
+
+  // ==========================================================
+  // IMPORTAR MARKDOWN
+  // ==========================================================
+
+  const handleFileChange = (files) => {
+    const file = Array.isArray(files) ? files[0] : files;
+    setSelectedFile(file || null);
+    setImportResult(null);
+  };
+
+  const handleImport = async () => {
+    if (!selectedFile) return;
+
+    setBusy(true);
     setError(null);
     setImportResult(null);
 
     try {
+      let data;
+
+      if (typeof selectedFile === 'string') {
+        data = selectedFile;
+      } else {
+        data = selectedFile.base64 || selectedFile.data;
+      }
+
+      if (!data) {
+        throw new Error('No se pudo leer el archivo Markdown.');
+      }
+
       const result = await invoke('processMarkdown', {
-        data: selectedFile.data,
-        sourceFile: selectedFile.name,
+        data,
+        sourceFile: selectedFile.name || 'minuta.md',
       });
 
       if (!result?.success) {
-        throw new Error('El procesamiento no pudo completarse.');
+        throw new Error('No se pudo procesar la minuta.');
       }
 
       setImportResult(result);
-      setCurrentPage(1);
-      await refreshData();
+      await refreshCandidates();
     } catch (err) {
-      console.error('[Minerva ADR] Error al importar minuta:', err);
-      setError('No fue posible importar la minuta. Revisa los registros de Forge.');
+      setError(errorMessage(err));
     } finally {
-      setImporting(false);
+      setBusy(false);
     }
-  }, [selectedFile, importing, refreshData]);
+  };
 
-  // Actualiza un campo del formulario manual.
-  const handleManualField = useCallback((field, value) => {
-    setManualForm((previous) => ({
-      ...previous,
-      [field]: value,
-    }));
-  }, []);
+  // ==========================================================
+  // CREAR CANDIDATO
+  // ==========================================================
 
-  // Cancela el registro manual.
-  const handleCancelManual = useCallback(() => {
-    setShowManualForm(false);
-    setManualForm(EMPTY_MANUAL_FORM);
-  }, []);
-
-  // Crea un candidato manual pendiente de revisión.
-  const handleCreateManual = useCallback(async () => {
-    if (creatingManual) return;
-
-    if (!manualForm.title.trim() || !manualForm.decision.trim()) {
-      setError('El título y la decisión son obligatorios.');
-      return;
-    }
-
+  const handleCreateManual = async () => {
     if (
-      manualForm.meeting_date &&
-      !/^\d{4}-\d{2}-\d{2}$/.test(manualForm.meeting_date)
+      !manualForm.title.trim() ||
+      !manualForm.decision.trim()
     ) {
-      setError('La fecha debe tener el formato YYYY-MM-DD.');
+      setError('Título y decisión son obligatorios.');
       return;
     }
 
-    setCreatingManual(true);
+    setBusy(true);
     setError(null);
 
     try {
-      const result = await invoke('createManualCandidate', {
-        title: manualForm.title,
-        decision: manualForm.decision,
-        context: manualForm.context,
-        job: manualForm.job,
-        decision_owner: manualForm.decision_owner,
-        meeting_date: manualForm.meeting_date || null,
-        source_reference: manualForm.source_reference,
-      });
+      const result = await invoke(
+        'createManualCandidate',
+        manualForm
+      );
 
       if (!result?.success) {
         throw new Error('No se pudo crear el candidato.');
       }
 
-      setShowManualForm(false);
-      setManualForm(EMPTY_MANUAL_FORM);
-      setCurrentPage(1);
-      setActiveView('active');
-      setReviewFilter('all');
-
-      await refreshData();
+      setManualForm(EMPTY_FORM);
+      setNotice('Candidato creado correctamente.');
+      setView('decisions');
+      await refreshCandidates();
     } catch (err) {
-      console.error('[Minerva ADR] Error al crear candidato manual:', err);
-      setError('No fue posible registrar la decisión manualmente.');
+      setError(errorMessage(err));
     } finally {
-      setCreatingManual(false);
+      setBusy(false);
     }
-  }, [creatingManual, manualForm, refreshData]);
+  };
 
-  // Validación o descarte de candidatos.
-  const handleReview = useCallback(async (candidateId, reviewStatus) => {
-    if (updating) return;
+  // ==========================================================
+  // REVISAR
+  // ==========================================================
 
-    setUpdating(candidateId);
+  const handleReview = async (id, reviewStatus) => {
+    setBusy(true);
     setError(null);
 
     try {
-      const result = await invoke('updateReviewStatus', {
-        id: candidateId,
-        reviewStatus,
-      });
+      const result = await invoke(
+        'updateReviewStatus',
+        { id, reviewStatus }
+      );
 
       if (!result?.success) {
-        throw new Error('No se pudo actualizar el candidato.');
+        throw new Error('No se pudo actualizar la revisión.');
       }
 
-      await loadCandidates();
+      setNotice(`Decisión marcada como ${reviewStatus}.`);
+      await refreshCandidates();
     } catch (err) {
-      console.error('[Minerva ADR] Error al actualizar revisión:', err);
-      setError('No fue posible actualizar el estado de revisión.');
+      setError(errorMessage(err));
     } finally {
-      setUpdating(null);
+      setBusy(false);
     }
-  }, [updating, loadCandidates]);
+  };
 
-  // Inicia la edición.
-  const handleStartEdit = useCallback((candidate) => {
-    setError(null);
-    setConfirmDeleteId(null);
-    setEditingCandidateId(candidate.id);
+  // ==========================================================
+  // EDITAR
+  // ==========================================================
+
+  const handleStartEdit = (candidate) => {
+    setExpandedId(candidate.id);
+    setEditingId(candidate.id);
 
     setEditForm({
-      title: candidate.title ?? '',
-      decision: candidate.decision ?? '',
-      context: candidate.context ?? '',
-      job: candidate.job ?? '',
-      decision_owner: candidate.decision_owner ?? '',
-      status: candidate.status ?? 'Propuesto',
-      review_status: candidate.review_status ?? 'Pendiente de revisión',
+      title: candidate.title || '',
+      decision: candidate.decision || '',
+      context: candidate.context || '',
+      job: candidate.job || '',
+      decision_owner: candidate.decision_owner || '',
+      status: candidate.status || 'Propuesto',
+      review_status:
+        candidate.review_status || 'Pendiente de revisión',
     });
-  }, []);
+  };
 
-  // Cancela la edición.
-  const handleCancelEdit = useCallback(() => {
-    setEditingCandidateId(null);
-    setEditForm(EMPTY_EDIT_FORM);
-  }, []);
+  const handleSaveEdit = async () => {
+    if (!editingId) return;
 
-  // Actualiza un campo del formulario de edición.
-  const handleEditField = useCallback((field, value) => {
-    setEditForm((previous) => ({
-      ...previous,
-      [field]: value,
-    }));
-  }, []);
-
-  // Guarda los cambios.
-  const handleSaveEdit = useCallback(async (candidateId) => {
-    if (updating) return;
-
-    if (!editForm.title.trim() || !editForm.decision.trim()) {
-      setError('El título y la decisión son obligatorios.');
-      return;
-    }
-
-    setUpdating(candidateId);
+    setBusy(true);
     setError(null);
 
     try {
-      const result = await invoke('updateCandidate', {
-        id: candidateId,
-        title: editForm.title,
-        decision: editForm.decision,
-        context: editForm.context,
-        job: editForm.job,
-        decision_owner: editForm.decision_owner,
-        status: editForm.status,
-        review_status: editForm.review_status,
-      });
+      const result = await invoke(
+        'updateCandidate',
+        { id: editingId, ...editForm }
+      );
 
       if (!result?.success) {
         throw new Error('No se pudo actualizar la decisión.');
       }
 
-      setEditingCandidateId(null);
-      setEditForm(EMPTY_EDIT_FORM);
-
-      await refreshData();
+      setEditingId(null);
+      setEditForm(EMPTY_EDIT);
+      setNotice('Decisión actualizada correctamente.');
+      await refreshCandidates();
     } catch (err) {
-      console.error('[Minerva ADR] Error al editar decisión:', err);
-      setError('No fue posible guardar los cambios de la decisión.');
+      setError(errorMessage(err));
     } finally {
-      setUpdating(null);
+      setBusy(false);
     }
-  }, [updating, editForm, refreshData]);
+  };
 
-  // Archivar candidato.
-  const handleArchive = useCallback(async (candidateId) => {
-    if (updating) return;
+  // ==========================================================
+  // ARCHIVAR / RESTAURAR / ELIMINAR
+  // ==========================================================
 
-    setUpdating(candidateId);
+  const handleAction = async (resolverName, id, message) => {
+    setBusy(true);
     setError(null);
 
     try {
-      const result = await invoke('archiveCandidate', {
-        id: candidateId,
-      });
+      const result = await invoke(
+        resolverName,
+        { id }
+      );
 
       if (!result?.success) {
-        throw new Error('No se pudo archivar el candidato.');
+        throw new Error('No se pudo completar la operación.');
       }
 
+      setNotice(message);
       setConfirmDeleteId(null);
-      setEditingCandidateId(null);
-      await refreshData();
+      setExpandedId(null);
+      await refreshCandidates();
     } catch (err) {
-      console.error('[Minerva ADR] Error al archivar:', err);
-      setError('No fue posible archivar la decisión.');
+      setError(errorMessage(err));
     } finally {
-      setUpdating(null);
+      setBusy(false);
     }
-  }, [updating, refreshData]);
+  };
 
-  // Restaurar candidato archivado.
-  const handleRestore = useCallback(async (candidateId) => {
-    if (updating) return;
+  // ==========================================================
+  // ESTADÍSTICAS Y PAGINACIÓN
+  // ==========================================================
 
-    setUpdating(candidateId);
-    setError(null);
-
-    try {
-      const result = await invoke('restoreCandidate', {
-        id: candidateId,
-      });
-
-      if (!result?.success) {
-        throw new Error('No se pudo restaurar el candidato.');
-      }
-
-      await refreshData();
-    } catch (err) {
-      console.error('[Minerva ADR] Error al restaurar:', err);
-      setError('No fue posible restaurar la decisión.');
-    } finally {
-      setUpdating(null);
-    }
-  }, [updating, refreshData]);
-
-  // Eliminación definitiva.
-  const handleDelete = useCallback(async (candidateId) => {
-    if (updating) return;
-
-    setUpdating(candidateId);
-    setError(null);
-
-    try {
-      const result = await invoke('deleteCandidate', {
-        id: candidateId,
-      });
-
-      if (!result?.success) {
-        throw new Error('No se pudo eliminar el candidato.');
-      }
-
-      setConfirmDeleteId(null);
-      setEditingCandidateId(null);
-      await refreshData();
-    } catch (err) {
-      console.error('[Minerva ADR] Error al eliminar:', err);
-      setError('No fue posible eliminar la decisión.');
-    } finally {
-      setUpdating(null);
-    }
-  }, [updating, refreshData]);
-
-  // Cambiar de vista.
-  const handleChangeView = useCallback((view) => {
-    setActiveView(view);
-    setReviewFilter('all');
-    setCurrentPage(1);
-    setConfirmDeleteId(null);
-    setEditingCandidateId(null);
-    setEditForm(EMPTY_EDIT_FORM);
-    setShowManualForm(false);
-    setManualForm(EMPTY_MANUAL_FORM);
-  }, []);
-
-  // Cambiar filtro de revisión.
-  const handleChangeFilter = useCallback((filter) => {
-    setReviewFilter(filter);
-    setCurrentPage(1);
-    setConfirmDeleteId(null);
-    setEditingCandidateId(null);
-  }, []);
-
-  // Carga inicial.
-  useEffect(() => {
-    refreshData();
-  }, [refreshData]);
-
-  // Indicadores de revisión.
   const pendingCount = candidates.filter(
-    (candidate) => candidate.review_status === 'Pendiente de revisión'
+    (c) => c.review_status === 'Pendiente de revisión'
   ).length;
 
   const validatedCount = candidates.filter(
-    (candidate) => candidate.review_status === 'Validado'
+    (c) => c.review_status === 'Validado'
   ).length;
 
   const discardedCount = candidates.filter(
-    (candidate) => candidate.review_status === 'Descartado'
+    (c) => c.review_status === 'Descartado'
   ).length;
 
-  // Apariencia de los estados.
-  const getReviewAppearance = (status) => {
-    switch (status) {
-      case 'Validado':
-        return 'success';
-      case 'Descartado':
-        return 'removed';
-      default:
-        return 'new';
-    }
-  };
+  const sourceCandidates =
+    activeView === 'active'
+      ? candidates
+      : archivedCandidates;
 
-  const getDecisionAppearance = (status) => {
-    switch (status) {
-      case 'Aprobada':
-        return 'success';
-      case 'Rechazada':
-      case 'Obsoleta':
-        return 'removed';
-      case 'En discusión':
-        return 'inprogress';
-      default:
-        return 'default';
-    }
-  };
+  const filteredCandidates = sourceCandidates.filter(
+    (c) =>
+      reviewFilter === 'all' ||
+      c.review_status === reviewFilter
+  );
 
-  // Datos de la vista seleccionada.
-  const visibleCandidates =
-    activeView === 'active' ? candidates : archivedCandidates;
-
-  const isCurrentLoading =
-    activeView === 'active' ? loading : archivedLoading;
-
-  // Aplicar filtro de revisión.
-  const filteredCandidates = activeView === 'active'
-    ? visibleCandidates.filter((candidate) =>
-        reviewFilter === 'all' ||
-        candidate.review_status === reviewFilter
-      )
-    : visibleCandidates;
-
-  // Paginación.
   const totalPages = Math.max(
     1,
     Math.ceil(filteredCandidates.length / PAGE_SIZE)
   );
 
   const safePage = Math.min(currentPage, totalPages);
-  const startIndex = (safePage - 1) * PAGE_SIZE;
 
-  const paginatedCandidates = filteredCandidates.slice(
-    startIndex,
-    startIndex + PAGE_SIZE
+  const visibleCandidates = filteredCandidates.slice(
+    (safePage - 1) * PAGE_SIZE,
+    safePage * PAGE_SIZE
   );
 
-  const firstVisible = filteredCandidates.length === 0
-    ? 0
-    : startIndex + 1;
+  // ==========================================================
+  // FORMULARIO DE EDICIÓN
+  // ==========================================================
 
-  const lastVisible = Math.min(
-    startIndex + PAGE_SIZE,
-    filteredCandidates.length
+  const renderEditForm = () => (
+    <Stack space="space.200">
+
+      <Heading size="small">Editar decisión</Heading>
+
+      <Field
+        label="Título"
+        value={editForm.title}
+        onChange={(value) =>
+          setEditForm((p) => ({ ...p, title: value }))
+        }
+      />
+
+      <Field
+        label="Decisión"
+        value={editForm.decision}
+        multiline
+        onChange={(value) =>
+          setEditForm((p) => ({ ...p, decision: value }))
+        }
+      />
+
+      <Field
+        label="Contexto"
+        value={editForm.context}
+        multiline
+        onChange={(value) =>
+          setEditForm((p) => ({ ...p, context: value }))
+        }
+      />
+
+      <Field
+        label="Proyecto"
+        value={editForm.job}
+        onChange={(value) =>
+          setEditForm((p) => ({ ...p, job: value }))
+        }
+      />
+
+      <Field
+        label="Responsable"
+        value={editForm.decision_owner}
+        onChange={(value) =>
+          setEditForm((p) => ({
+            ...p,
+            decision_owner: value,
+          }))
+        }
+      />
+
+      <Stack space="space.050">
+        <Text weight="semibold">Estado de decisión</Text>
+        <Select
+          options={DECISION_STATUSES}
+          value={
+            DECISION_STATUSES.find(
+              (o) => o.value === editForm.status
+            ) || DECISION_STATUSES[0]
+          }
+          onChange={(option) =>
+            setEditForm((p) => ({
+              ...p,
+              status: option?.value || 'Propuesto',
+            }))
+          }
+        />
+      </Stack>
+
+      <Stack space="space.050">
+        <Text weight="semibold">Estado de revisión</Text>
+        <Select
+          options={REVIEW_STATUSES}
+          value={
+            REVIEW_STATUSES.find(
+              (o) => o.value === editForm.review_status
+            ) || REVIEW_STATUSES[0]
+          }
+          onChange={(option) =>
+            setEditForm((p) => ({
+              ...p,
+              review_status:
+                option?.value || 'Pendiente de revisión',
+            }))
+          }
+        />
+      </Stack>
+
+      <Inline space="space.100">
+        <Button
+          appearance="primary"
+          isDisabled={busy}
+          onClick={handleSaveEdit}
+        >
+          Guardar cambios
+        </Button>
+
+        <Button
+          appearance="subtle"
+          onClick={() => setEditingId(null)}
+        >
+          Cancelar
+        </Button>
+      </Inline>
+
+    </Stack>
   );
 
-  // Ajustar página si se elimina o archiva el último elemento de una página.
-  useEffect(() => {
-    if (currentPage > totalPages) {
-      setCurrentPage(totalPages);
-    }
-  }, [currentPage, totalPages]);
+  // ==========================================================
+  // TARJETA ADR COMPACTA
+  // ==========================================================
 
-  return (
-    <Stack space="space.300">
 
-      {/* ENCABEZADO */}
-      <Box>
-        <Stack space="space.100">
-          <Inline alignBlock="center" space="space.100">
-            <Heading size="xlarge">Minerva ADR</Heading>
-            <Lozenge appearance="inprogress">Beta</Lozenge>
-          </Inline>
+  // ==========================================================
+  // TARJETA ADR - DISEÑO CON CONTENEDORES Y COLORES
+  // ==========================================================
 
-          <Text>
-            Registro, seguimiento y validación de decisiones técnicas.
-          </Text>
 
-          <Inline space="space.100">
-            <Button
-              appearance="default"
-              onClick={refreshData}
-              isDisabled={loading || archivedLoading || importing || updating !== null || creatingManual}
-            >
-              Actualizar datos
-            </Button>
-          </Inline>
-        </Stack>
-      </Box>
+  // ==========================================================
+  // TARJETA ADR - DISEÑO DE ALTO CONTRASTE
+  // ==========================================================
 
-      {/* MENSAJES DE ERROR */}
-      {error && (
-        <SectionMessage appearance="error">
-          <Text>{error}</Text>
-        </SectionMessage>
-      )}
+  const renderCandidate = (candidate) => {
+    const expanded = expandedId === candidate.id;
+    const editing = editingId === candidate.id;
+    const archived = activeView === 'archived';
 
-      {/* INDICADORES */}
-      <Box>
-        <Stack space="space.200">
-          <Heading size="medium">Resumen de revisión</Heading>
+    const isValidated =
+      candidate.review_status === 'Validado';
 
-          <Inline space="space.200" shouldWrap>
-            <Box
-              padding="space.200"
-              backgroundColor="elevation.surface"
-              borderColor="color.border"
-              borderWidth="border.width"
-              borderRadius="medium"
-            >
-              <Stack space="space.100">
-                <Text>Total de candidatos activos</Text>
-                <Heading size="xlarge">{candidates.length}</Heading>
-              </Stack>
-            </Box>
+    const isDiscarded =
+      candidate.review_status === 'Descartado';
 
-            <Box
-              padding="space.200"
-              backgroundColor="elevation.surface"
-              borderColor="color.border"
-              borderWidth="border.width"
-              borderRadius="medium"
-            >
-              <Stack space="space.100">
-                <Text>Pendientes</Text>
-                <Heading size="xlarge">{pendingCount}</Heading>
-                <Lozenge appearance="new">Por revisar</Lozenge>
-              </Stack>
-            </Box>
-
-            <Box
-              padding="space.200"
-              backgroundColor="elevation.surface"
-              borderColor="color.border"
-              borderWidth="border.width"
-              borderRadius="medium"
-            >
-              <Stack space="space.100">
-                <Text>Validados</Text>
-                <Heading size="xlarge">{validatedCount}</Heading>
-                <Lozenge appearance="success">Aceptados</Lozenge>
-              </Stack>
-            </Box>
-
-            <Box
-              padding="space.200"
-              backgroundColor="elevation.surface"
-              borderColor="color.border"
-              borderWidth="border.width"
-              borderRadius="medium"
-            >
-              <Stack space="space.100">
-                <Text>Descartados</Text>
-                <Heading size="xlarge">{discardedCount}</Heading>
-                <Lozenge appearance="removed">Descartados</Lozenge>
-              </Stack>
-            </Box>
-          </Inline>
-        </Stack>
-      </Box>
-
-      {/* IMPORTACIÓN DE MINUTAS */}
+    return (
       <Box
-        padding="space.300"
-        backgroundColor="elevation.surface"
-        borderColor="color.border"
-        borderWidth="border.width"
-        borderRadius="medium"
+        key={candidate.id}
+        padding="space.400"
+        backgroundColor="color.background.neutral"
+        borderRadius="large"
       >
-        <Stack space="space.200">
-          <Heading size="medium">Importar minuta</Heading>
-
-          <Text>
-            Carga una minuta Markdown para detectar posibles decisiones
-            arquitectónicas y registrarlas como candidatos.
-          </Text>
-
-          <FilePicker
-            label="Seleccionar archivo Markdown"
-            description="Formato admitido: .md"
-            onChange={handleFileChange}
-          />
-
-          {selectedFile && (
-            <Box
-              padding="space.200"
-              backgroundColor="elevation.surface.sunken"
-              borderRadius="medium"
-            >
-              <Stack space="space.100">
-                <Text>{selectedFile.name}</Text>
-                <Text>{selectedFile.size} bytes</Text>
-
-                <Button
-                  appearance="primary"
-                  onClick={handleImport}
-                  isDisabled={importing || creatingManual}
-                >
-                  {importing ? 'Procesando...' : 'Importar minuta'}
-                </Button>
-              </Stack>
-            </Box>
-          )}
-
-          {importing && (
-            <Inline alignBlock="center" space="space.100">
-              <Spinner size="small" />
-              <Text>Analizando minuta y registrando candidatos...</Text>
-            </Inline>
-          )}
-
-          {importResult && (
-            <SectionMessage appearance="success">
-              <Stack space="space.100">
-                <Text>Minuta procesada correctamente.</Text>
-                <Text>Archivo: {importResult.source_file}</Text>
-                <Text>
-                  Candidatos encontrados: {importResult.total_candidates}
-                </Text>
-                <Text>Insertados: {importResult.inserted}</Text>
-                <Text>Duplicados omitidos: {importResult.duplicates}</Text>
-
-                {importResult.warnings?.map((warning, index) => (
-                  <Text key={index}>{warning}</Text>
-                ))}
-              </Stack>
-            </SectionMessage>
-          )}
-        </Stack>
-      </Box>
-
-      {/* REGISTRO MANUAL */}
-      <Box
-        padding="space.300"
-        backgroundColor="elevation.surface"
-        borderColor="color.border"
-        borderWidth="border.width"
-        borderRadius="medium"
-      >
-        <Stack space="space.200">
-          <Heading size="medium">Registro manual</Heading>
-
-          <Text>
-            Registra una decisión que no haya sido detectada en una minuta
-            o que provenga de otra fuente.
-          </Text>
-
-          {!showManualForm ? (
-            <Button
-              appearance="primary"
-              onClick={() => {
-                setError(null);
-                setShowManualForm(true);
-              }}
-              isDisabled={creatingManual || importing || updating !== null}
-            >
-              Registrar decisión manualmente
-            </Button>
-          ) : (
-            <Box
-              padding="space.200"
-              backgroundColor="elevation.surface.sunken"
-              borderRadius="medium"
-            >
-              <Stack space="space.200">
-                <Heading size="medium">Nueva decisión</Heading>
-
-                <Stack space="space.100">
-                  <Text weight="semibold">Título *</Text>
-                  <Textfield
-                    value={manualForm.title}
-                    onChange={(event) =>
-                      handleManualField('title', event.target.value)
-                    }
-                    placeholder="Ej. Uso de almacenamiento compartido"
-                    isDisabled={creatingManual}
-                  />
-                </Stack>
-
-                <Stack space="space.100">
-                  <Text weight="semibold">Decisión *</Text>
-                  <TextArea
-                    value={manualForm.decision}
-                    onChange={(event) =>
-                      handleManualField('decision', event.target.value)
-                    }
-                    placeholder="Describe la decisión que se propone registrar."
-                    minimumRows={4}
-                    isDisabled={creatingManual}
-                  />
-                </Stack>
-
-                <Stack space="space.100">
-                  <Text weight="semibold">Contexto</Text>
-                  <TextArea
-                    value={manualForm.context}
-                    onChange={(event) =>
-                      handleManualField('context', event.target.value)
-                    }
-                    placeholder="¿Qué situación o problema motivó esta decisión?"
-                    minimumRows={3}
-                    isDisabled={creatingManual}
-                  />
-                </Stack>
-
-                <Stack space="space.100">
-                  <Text weight="semibold">Área o trabajo</Text>
-                  <Textfield
-                    value={manualForm.job}
-                    onChange={(event) =>
-                      handleManualField('job', event.target.value)
-                    }
-                    placeholder="Ej. Infraestructura, IA, Clusters..."
-                    isDisabled={creatingManual}
-                  />
-                </Stack>
-
-                <Stack space="space.100">
-                  <Text weight="semibold">Responsable</Text>
-                  <Textfield
-                    value={manualForm.decision_owner}
-                    onChange={(event) =>
-                      handleManualField('decision_owner', event.target.value)
-                    }
-                    placeholder="Nombre del responsable"
-                    isDisabled={creatingManual}
-                  />
-                </Stack>
-
-                <Stack space="space.100">
-                  <Text weight="semibold">Fecha de la decisión</Text>
-                  <Textfield
-                    value={manualForm.meeting_date}
-                    onChange={(event) =>
-                      handleManualField('meeting_date', event.target.value)
-                    }
-                    placeholder="YYYY-MM-DD"
-                    isDisabled={creatingManual}
-                  />
-                  <Text size="small">
-                    Formato: año-mes-día. Campo opcional.
-                  </Text>
-                </Stack>
-
-                <Stack space="space.100">
-                  <Text weight="semibold">Referencia de origen</Text>
-                  <Textfield
-                    value={manualForm.source_reference}
-                    onChange={(event) =>
-                      handleManualField('source_reference', event.target.value)
-                    }
-                    placeholder="Ej. Reunión del equipo, conversación, documento..."
-                    isDisabled={creatingManual}
-                  />
-                </Stack>
-
-                <SectionMessage appearance="information">
-                  <Text>
-                    El candidato se creará como Propuesto y Pendiente de revisión.
-                    Deberá ser validado manualmente antes de continuar en el flujo.
-                  </Text>
-                </SectionMessage>
-
-                <Inline space="space.200" shouldWrap>
-                  <Button
-                    appearance="primary"
-                    onClick={handleCreateManual}
-                    isDisabled={creatingManual || importing || updating !== null}
-                  >
-                    {creatingManual ? 'Registrando...' : 'Guardar candidato'}
-                  </Button>
-
-                  <Button
-                    appearance="default"
-                    onClick={handleCancelManual}
-                    isDisabled={creatingManual}
-                  >
-                    Cancelar
-                  </Button>
-                </Inline>
-              </Stack>
-            </Box>
-          )}
-
-          {creatingManual && (
-            <Inline alignBlock="center" space="space.100">
-              <Spinner size="small" />
-              <Text>Registrando candidato...</Text>
-            </Inline>
-          )}
-        </Stack>
-      </Box>
-
-      {/* GESTIÓN DE DECISIONES */}
-      <Box>
         <Stack space="space.300">
-          <Heading size="medium">Gestión de decisiones</Heading>
 
-          {/* VISTAS */}
-          <Inline space="space.100" shouldWrap>
-            <Button
-              appearance={activeView === 'active' ? 'primary' : 'default'}
-              onClick={() => handleChangeView('active')}
+          {/* ================================================ */}
+          {/* CABECERA */}
+          {/* ================================================ */}
+
+          <Stack space="space.150">
+
+            <Heading size="medium">
+              {candidate.title || 'Sin título'}
+            </Heading>
+
+            <Inline space="space.100" shouldWrap>
+
+              <Lozenge
+                appearance={reviewAppearance(
+                  candidate.review_status
+                )}
+              >
+                {candidate.review_status ||
+                  'Pendiente de revisión'}
+              </Lozenge>
+
+              <Lozenge
+                appearance={decisionAppearance(
+                  candidate.status
+                )}
+              >
+                {candidate.status || 'Propuesto'}
+              </Lozenge>
+
+              {archived && (
+                <Lozenge appearance="default">
+                  Archivada
+                </Lozenge>
+              )}
+
+            </Inline>
+
+          </Stack>
+
+          {/* ================================================ */}
+          {/* METADATOS */}
+          {/* ================================================ */}
+
+          <Box
+            padding="space.200"
+            backgroundColor="elevation.surface.raised"
+            borderRadius="medium"
+          >
+            <Inline space="space.300" shouldWrap>
+
+              {candidate.job && (
+                <Text size="small">
+                  Proyecto: {candidate.job}
+                </Text>
+              )}
+
+              {candidate.decision_owner && (
+                <Text size="small">
+                  Responsable: {candidate.decision_owner}
+                </Text>
+              )}
+
+              {candidate.meeting_date && (
+                <Text size="small">
+                  Fecha: {formatDate(candidate.meeting_date)}
+                </Text>
+              )}
+
+            </Inline>
+          </Box>
+
+          
+          {/* ORIGEN DE LA DECISIÓN */}
+
+          {(candidate.source_reference ||
+            candidate.source_file) && (
+            <Box
+              padding="space.150"
+              backgroundColor="elevation.surface.raised"
+              borderRadius="medium"
             >
-              Activas ({candidates.length})
-            </Button>
+              <Stack space="space.050">
+                <Text weight="semibold" size="small">
+                  Origen de la minuta
+                </Text>
 
-            <Button
-              appearance={activeView === 'archived' ? 'primary' : 'default'}
-              onClick={() => handleChangeView('archived')}
-            >
-              Archivadas ({archivedCandidates.length})
-            </Button>
-          </Inline>
+                <Text size="small">
+                  {candidate.source_reference ||
+                    candidate.source_file}
+                </Text>
+              </Stack>
+            </Box>
+          )}
 
-          {/* FILTROS DE REVISIÓN */}
-          {activeView === 'active' && (
+
+          {/* ================================================ */}
+          {/* RESUMEN */}
+          {/* ================================================ */}
+
+          {!expanded && (
             <Stack space="space.100">
-              <Text weight="semibold">Filtrar por estado de revisión</Text>
 
-              <Inline space="space.100" shouldWrap>
-                {REVIEW_FILTERS.map((filter) => {
-                  const count = filter.value === 'all'
-                    ? candidates.length
-                    : candidates.filter(
-                        (candidate) =>
-                          candidate.review_status === filter.value
-                      ).length;
+              <Text weight="semibold">
+                Resumen de la decisión
+              </Text>
 
-                  return (
-                    <Button
-                      key={filter.value}
-                      appearance={
-                        reviewFilter === filter.value
-                          ? 'primary'
-                          : 'default'
-                      }
-                      onClick={() => handleChangeFilter(filter.value)}
-                    >
-                      {filter.label} ({count})
-                    </Button>
-                  );
-                })}
-              </Inline>
+              <Text>
+                {candidate.decision
+                  ? candidate.decision.length > 200
+                    ? `${candidate.decision.slice(0, 200)}...`
+                    : candidate.decision
+                  : 'Sin descripción'}
+              </Text>
+
             </Stack>
           )}
 
-          {activeView === 'active' ? (
-            <>
-              <Text>
-                Revisa los candidatos extraídos de las reuniones y determina
-                cuáles deben conservarse.
-              </Text>
-              <Lozenge appearance="success">Vista activa</Lozenge>
-            </>
-          ) : (
-            <>
-              <Text>
-                Estas decisiones están archivadas. Puedes restaurarlas
-                o eliminarlas definitivamente.
-              </Text>
-              <Lozenge appearance="default">Archivo histórico</Lozenge>
-            </>
-          )}
+          {/* ================================================ */}
+          {/* ACCIONES PRINCIPALES */}
+          {/* ================================================ */}
 
-          {/* CARGA */}
-          {isCurrentLoading && (
-            <Inline alignBlock="center" space="space.100">
-              <Spinner size="medium" />
-              <Text>Cargando decisiones...</Text>
-            </Inline>
-          )}
+          <Inline
+            space="space.100"
+            alignBlock="center"
+            shouldWrap
+          >
 
-          {/* LISTA VACÍA */}
-          {!isCurrentLoading && filteredCandidates.length === 0 && (
-            <SectionMessage appearance="information">
-              <Text>
-                {activeView === 'archived'
-                  ? 'Todavía no hay decisiones archivadas.'
-                  : reviewFilter === 'all'
-                    ? 'No hay decisiones activas. Importa una minuta o registra una decisión manualmente.'
-                    : 'No hay decisiones que coincidan con este filtro.'}
-              </Text>
-            </SectionMessage>
-          )}
+            {/* AZUL - VER DETALLES */}
 
-          {/* TARJETAS */}
-          {!isCurrentLoading && paginatedCandidates.map((candidate) => {
-            const isPending =
-              candidate.review_status === 'Pendiente de revisión';
+            <Button
+              appearance="primary"
+              onClick={() => {
+                setExpandedId(
+                  expanded ? null : candidate.id
+                );
 
-            const isUpdating = updating === candidate.id;
-            const isConfirmingDelete = confirmDeleteId === candidate.id;
-            const isEditing = editingCandidateId === candidate.id;
-            const isManual = candidate.source_type === 'manual';
+                if (expanded) {
+                  setEditingId(null);
+                  setConfirmDeleteId(null);
+                }
+              }}
+            >
+              {expanded
+                ? 'Ocultar detalles'
+                : 'Ver detalles'}
+            </Button>
 
-            return (
+            {/* VERDE - VALIDAR */}
+
+            {!archived && !isValidated && (
               <Box
-                key={candidate.id}
-                padding="space.300"
-                backgroundColor="elevation.surface"
-                borderColor="color.border.accent"
-                borderWidth="border.width"
-                borderRadius="large"
+                backgroundColor="color.background.success"
+                borderRadius="medium"
               >
+                <Button
+                  appearance="subtle"
+                  isDisabled={busy}
+                  onClick={() =>
+                    handleReview(
+                      candidate.id,
+                      'Validado'
+                    )
+                  }
+                >
+                  Validar
+                </Button>
+              </Box>
+            )}
+
+            {/* AMARILLO - DESCARTAR */}
+
+            {!archived && !isDiscarded && (
+              <Box
+                backgroundColor="color.background.warning"
+                borderRadius="medium"
+              >
+                <Button
+                  appearance="subtle"
+                  isDisabled={busy}
+                  onClick={() =>
+                    handleReview(
+                      candidate.id,
+                      'Descartado'
+                    )
+                  }
+                >
+                  Descartar
+                </Button>
+              </Box>
+            )}
+
+          </Inline>
+
+          {/* ================================================ */}
+          {/* CONTENIDO EXPANDIDO */}
+          {/* ================================================ */}
+
+          {expanded && (
+            <Stack space="space.300">
+
+              {editing ? (
+
+                <Box
+                  padding="space.300"
+                  backgroundColor="elevation.surface.raised"
+                  borderRadius="medium"
+                >
+                  {renderEditForm()}
+                </Box>
+
+              ) : (
+
                 <Stack space="space.300">
 
-                  {/* TÍTULO Y ESTADOS */}
-                  <Stack space="space.100">
-                    <Heading size="medium">{candidate.title}</Heading>
+                  {/* DECISIÓN */}
 
-                    <Inline space="space.100" shouldWrap>
-                      <Lozenge appearance={getReviewAppearance(candidate.review_status)}>
-                        {candidate.review_status}
-                      </Lozenge>
+                  <Box
+                    padding="space.300"
+                    backgroundColor="elevation.surface.raised"
+                    borderRadius="medium"
+                  >
+                    <Stack space="space.100">
 
-                      <Lozenge appearance={getDecisionAppearance(candidate.status)}>
-                        {candidate.status}
-                      </Lozenge>
+                      <Heading size="small">
+                        Decisión
+                      </Heading>
 
-                      <Lozenge appearance={isManual ? 'inprogress' : 'default'}>
-                        {isManual ? 'Registro manual' : 'Minuta Markdown'}
-                      </Lozenge>
+                      <Text>
+                        {candidate.decision ||
+                          'Sin descripción'}
+                      </Text>
 
-                      {activeView === 'archived' && (
-                        <Lozenge appearance="default">Archivada</Lozenge>
-                      )}
-                    </Inline>
-                  </Stack>
+                    </Stack>
+                  </Box>
 
-                  {/* FORMULARIO DE EDICIÓN */}
-                  {isEditing && activeView === 'active' ? (
+                  {/* CONTEXTO */}
+
+                  {candidate.context && (
+                    <Box
+                      padding="space.300"
+                      backgroundColor="elevation.surface.raised"
+                      borderRadius="medium"
+                    >
+                      <Stack space="space.100">
+
+                        <Heading size="small">
+                          Contexto
+                        </Heading>
+
+                        <Text>
+                          {candidate.context}
+                        </Text>
+
+                      </Stack>
+                    </Box>
+                  )}
+
+                  {/* ORIGEN */}
+
+                  {(candidate.source_file ||
+                    candidate.source_reference) && (
                     <Box
                       padding="space.200"
-                      backgroundColor="elevation.surface.sunken"
+                      backgroundColor="elevation.surface.raised"
+                      borderRadius="medium"
+                    >
+                      <Stack space="space.050">
+
+                        <Text weight="semibold">
+                          Origen
+                        </Text>
+
+                        <Text size="small">
+                          {candidate.source_file ||
+                            candidate.source_reference}
+                        </Text>
+
+                      </Stack>
+                    </Box>
+                  )}
+
+                  {/* ====================================== */}
+                  {/* ACCIONES SECUNDARIAS */}
+                  {/* ====================================== */}
+
+                  <Inline
+                    space="space.100"
+                    alignBlock="center"
+                    shouldWrap
+                  >
+
+                    {!archived ? (
+                      <>
+
+                        {/* EDITAR - AZUL */}
+
+                        <Box
+                          backgroundColor="color.background.information"
+                          borderRadius="medium"
+                        >
+                          <Button
+                            appearance="subtle"
+                            isDisabled={busy}
+                            onClick={() =>
+                              handleStartEdit(candidate)
+                            }
+                          >
+                            Editar
+                          </Button>
+                        </Box>
+
+                        {/* ARCHIVAR - GRIS */}
+
+                        <Box
+                          backgroundColor="color.background.neutral"
+                          borderRadius="medium"
+                        >
+                          <Button
+                            appearance="subtle"
+                            isDisabled={busy}
+                            onClick={() =>
+                              handleAction(
+                                'archiveCandidate',
+                                candidate.id,
+                                'Candidato archivado.'
+                              )
+                            }
+                          >
+                            Archivar
+                          </Button>
+                        </Box>
+
+                      </>
+                    ) : (
+
+                      /* RESTAURAR - VERDE */
+
+                      <Box
+                        backgroundColor="color.background.success"
+                        borderRadius="medium"
+                      >
+                        <Button
+                          appearance="subtle"
+                          isDisabled={busy}
+                          onClick={() =>
+                            handleAction(
+                              'restoreCandidate',
+                              candidate.id,
+                              'Candidato restaurado.'
+                            )
+                          }
+                        >
+                          Restaurar
+                        </Button>
+                      </Box>
+
+                    )}
+
+                  </Inline>
+
+                  {/* ====================================== */}
+                  {/* ELIMINACIÓN */}
+                  {/* ====================================== */}
+
+                  {confirmDeleteId === candidate.id ? (
+
+                    <Box
+                      padding="space.300"
+                      backgroundColor="color.background.danger"
                       borderRadius="medium"
                     >
                       <Stack space="space.200">
-                        <Heading size="medium">Editar decisión</Heading>
 
-                        <Stack space="space.100">
-                          <Text weight="semibold">Título</Text>
-                          <Textfield
-                            value={editForm.title}
-                            onChange={(event) =>
-                              handleEditField('title', event.target.value)
-                            }
-                            isDisabled={isUpdating}
-                          />
-                        </Stack>
-
-                        <Stack space="space.100">
-                          <Text weight="semibold">Decisión</Text>
-                          <TextArea
-                            value={editForm.decision}
-                            onChange={(event) =>
-                              handleEditField('decision', event.target.value)
-                            }
-                            minimumRows={4}
-                            isDisabled={isUpdating}
-                          />
-                        </Stack>
-
-                        <Stack space="space.100">
-                          <Text weight="semibold">Contexto</Text>
-                          <TextArea
-                            value={editForm.context}
-                            onChange={(event) =>
-                              handleEditField('context', event.target.value)
-                            }
-                            minimumRows={3}
-                            isDisabled={isUpdating}
-                          />
-                        </Stack>
-
-                        <Stack space="space.100">
-                          <Text weight="semibold">Área o trabajo</Text>
-                          <Textfield
-                            value={editForm.job}
-                            onChange={(event) =>
-                              handleEditField('job', event.target.value)
-                            }
-                            isDisabled={isUpdating}
-                          />
-                        </Stack>
-
-                        <Stack space="space.100">
-                          <Text weight="semibold">Responsable</Text>
-                          <Textfield
-                            value={editForm.decision_owner}
-                            onChange={(event) =>
-                              handleEditField('decision_owner', event.target.value)
-                            }
-                            isDisabled={isUpdating}
-                          />
-                        </Stack>
-
-                        <Stack space="space.100">
-                          <Text weight="semibold">Estado de la decisión</Text>
-                          <Select
-                            options={DECISION_STATUSES}
-                            value={DECISION_STATUSES.find(
-                              (option) => option.value === editForm.status
-                            )}
-                            onChange={(option) =>
-                              handleEditField('status', option?.value ?? 'Propuesto')
-                            }
-                            isDisabled={isUpdating}
-                          />
-                        </Stack>
-
-                        <Stack space="space.100">
-                          <Text weight="semibold">Estado de revisión</Text>
-                          <Select
-                            options={REVIEW_STATUSES}
-                            value={REVIEW_STATUSES.find(
-                              (option) => option.value === editForm.review_status
-                            )}
-                            onChange={(option) =>
-                              handleEditField(
-                                'review_status',
-                                option?.value ?? 'Pendiente de revisión'
-                              )
-                            }
-                            isDisabled={isUpdating}
-                          />
-                        </Stack>
-
-                        <Text size="small">
-                          Puedes modificar tanto el estado de la decisión como
-                          el estado de revisión humana. Son estados independientes.
+                        <Text weight="semibold">
+                          Confirmar eliminación
                         </Text>
 
-                        <Inline space="space.200" shouldWrap>
-                          <Button
-                            appearance="primary"
-                            onClick={() => handleSaveEdit(candidate.id)}
-                            isDisabled={updating !== null}
-                          >
-                            {isUpdating ? 'Guardando...' : 'Guardar cambios'}
-                          </Button>
-
-                          <Button
-                            appearance="default"
-                            onClick={handleCancelEdit}
-                            isDisabled={updating !== null}
-                          >
-                            Cancelar
-                          </Button>
-                        </Inline>
-                      </Stack>
-                    </Box>
-                  ) : (
-                    <>
-                      {/* METADATOS */}
-                      <Box
-                        padding="space.200"
-                        backgroundColor="elevation.surface.sunken"
-                        borderRadius="medium"
-                      >
-                        <Stack space="space.100">
-                          <Text>
-                            <Text weight="semibold" inline>Proyecto: </Text>
-                            {candidate.job || 'No especificado'}
-                          </Text>
-
-                          <Text>
-                            <Text weight="semibold" inline>Responsable: </Text>
-                            {candidate.decision_owner || 'No especificado'}
-                          </Text>
-
-                          <Text>
-                            <Text weight="semibold" inline>Fecha: </Text>
-                            {candidate.meeting_date || 'No especificada'}
-                          </Text>
-
-                          {activeView === 'archived' && candidate.archived_at && (
-                            <Text>
-                              <Text weight="semibold" inline>Archivada el: </Text>
-                              {String(candidate.archived_at)}
-                            </Text>
-                          )}
-                        </Stack>
-                      </Box>
-
-                      {/* DECISIÓN */}
-                      <Stack space="space.100">
-                        <Heading size="small">Decisión</Heading>
-                        <Text>{candidate.decision}</Text>
-                      </Stack>
-
-                      {/* CONTEXTO */}
-                      {candidate.context && (
-                        <Stack space="space.100">
-                          <Heading size="small">Contexto</Heading>
-                          <Text>{candidate.context}</Text>
-                        </Stack>
-                      )}
-
-                      {/* FUENTE */}
-                      <Stack space="space.100">
-                        <Text size="small">
-                          <Text weight="semibold" inline>Origen: </Text>
-                          {isManual ? 'Registro manual' : 'Minuta Markdown'}
+                        <Text>
+                          Esta decisión será eliminada
+                          permanentemente de la base de datos.
+                          Esta acción no se puede deshacer.
                         </Text>
 
-                        {candidate.source_reference && (
-                          <Text size="small">
-                            <Text weight="semibold" inline>Referencia: </Text>
-                            {candidate.source_reference}
-                          </Text>
-                        )}
-
-                        {candidate.source_file && (
-                          <Text size="small">
-                            <Text weight="semibold" inline>Archivo: </Text>
-                            {candidate.source_file}
-                          </Text>
-                        )}
-                      </Stack>
-                    </>
-                  )}
-
-                  {/* ACCIONES ACTIVAS */}
-                  {activeView === 'active' && !isEditing && (
-                    <Stack space="space.200">
-
-                      {/* REVISIÓN HUMANA */}
-                      <Box
-                        padding="space.200"
-                        backgroundColor="elevation.surface.sunken"
-                        borderRadius="medium"
-                      >
-                        <Stack space="space.100">
-                          <Heading size="small">Revisión humana</Heading>
-
-                          {isPending ? (
-                            <>
-                              <Text size="small">
-                                Validar confirma que el candidato merece continuar
-                                en el flujo ADR. No aprueba la decisión técnica.
-                              </Text>
-
-                              <Inline space="space.200" shouldWrap>
-                                <Button
-                                  appearance="primary"
-                                  onClick={() => handleReview(candidate.id, 'Validado')}
-                                  isDisabled={updating !== null}
-                                >
-                                  {isUpdating ? 'Actualizando...' : 'Validar candidato'}
-                                </Button>
-
-                                <Button
-                                  appearance="danger"
-                                  onClick={() => handleReview(candidate.id, 'Descartado')}
-                                  isDisabled={updating !== null}
-                                >
-                                  Descartar
-                                </Button>
-                              </Inline>
-                            </>
-                          ) : (
-                            <Text size="small">
-                              Revisión completada. Estado: {candidate.review_status}.
-                            </Text>
-                          )}
-                        </Stack>
-                      </Box>
-
-                      {/* GESTIÓN DE LA DECISIÓN */}
-                      <Box
-                        padding="space.200"
-                        backgroundColor="elevation.surface.sunken"
-                        borderRadius="medium"
-                      >
-                        <Stack space="space.100">
-                          <Heading size="small">Acciones</Heading>
-
-                          <Inline space="space.200" shouldWrap>
-                            <Button
-                              appearance="primary"
-                              onClick={() => handleStartEdit(candidate)}
-                              isDisabled={updating !== null}
-                            >
-                              Editar
-                            </Button>
-
-                            <Button
-                              appearance="warning"
-                              onClick={() => handleArchive(candidate.id)}
-                              isDisabled={updating !== null}
-                            >
-                              {isUpdating ? 'Procesando...' : 'Archivar'}
-                            </Button>
-
-                            <Button
-                              appearance="danger"
-                              onClick={() => setConfirmDeleteId(candidate.id)}
-                              isDisabled={updating !== null}
-                            >
-                              Eliminar
-                            </Button>
-                          </Inline>
-                        </Stack>
-                      </Box>
-                    </Stack>
-                  )}
-
-                  {/* ACCIONES ARCHIVADAS */}
-                  {activeView === 'archived' && (
-                    <Box
-                      padding="space.200"
-                      backgroundColor="elevation.surface.sunken"
-                      borderRadius="medium"
-                    >
-                      <Stack space="space.100">
-                        <Heading size="small">Acciones</Heading>
-
-                        <Inline space="space.200" shouldWrap>
-                          <Button
-                            appearance="primary"
-                            onClick={() => handleRestore(candidate.id)}
-                            isDisabled={updating !== null}
-                          >
-                            {isUpdating ? 'Procesando...' : 'Restaurar'}
-                          </Button>
+                        <Inline
+                          space="space.100"
+                          shouldWrap
+                        >
 
                           <Button
                             appearance="danger"
-                            onClick={() => setConfirmDeleteId(candidate.id)}
-                            isDisabled={updating !== null}
+                            isDisabled={busy}
+                            onClick={() =>
+                              handleAction(
+                                'deleteCandidate',
+                                candidate.id,
+                                'Candidato eliminado.'
+                              )
+                            }
                           >
                             Eliminar definitivamente
                           </Button>
+
+                          <Button
+                            appearance="default"
+                            onClick={() =>
+                              setConfirmDeleteId(null)
+                            }
+                          >
+                            Cancelar
+                          </Button>
+
                         </Inline>
+
                       </Stack>
                     </Box>
+
+                  ) : (
+
+                    <Inline space="space.100">
+
+                      {/* ELIMINAR - ROJO */}
+
+                      <Button
+                        appearance="danger"
+                        isDisabled={busy}
+                        onClick={() =>
+                          setConfirmDeleteId(candidate.id)
+                        }
+                      >
+                        Eliminar
+                      </Button>
+
+                    </Inline>
+
                   )}
 
-                  {/* CONFIRMACIÓN DE ELIMINACIÓN */}
-                  {isConfirmingDelete && (
+                </Stack>
+
+              )}
+
+            </Stack>
+          )}
+
+        </Stack>
+      </Box>
+    );
+  };
+
+  // ==========================================================
+  // VISTA: DECISIONES
+  // ==========================================================
+
+  const renderDecisions = () => (
+    <Stack space="space.300">
+
+      <Inline
+        space="space.200"
+        alignBlock="center"
+        shouldWrap
+      >
+        <Heading size="medium">
+          Decisiones arquitectónicas
+        </Heading>
+
+        <Button
+          appearance="subtle"
+          isDisabled={busy}
+          onClick={refreshCandidates}
+        >
+          Actualizar
+        </Button>
+      </Inline>
+
+      {/* INDICADORES */}
+
+      <Inline space="space.200" shouldWrap>
+        <Lozenge appearance="default">
+          Total: {candidates.length}
+        </Lozenge>
+
+        <Lozenge appearance="inprogress">
+          Pendientes: {pendingCount}
+        </Lozenge>
+
+        <Lozenge appearance="success">
+          Validadas: {validatedCount}
+        </Lozenge>
+
+        <Lozenge appearance="removed">
+          Descartadas: {discardedCount}
+        </Lozenge>
+      </Inline>
+
+      {/* ACTIVAS / ARCHIVADAS */}
+
+      <Inline space="space.100">
+        <Button
+          appearance={
+            activeView === 'active' ? 'primary' : 'default'
+          }
+          onClick={() => {
+            setActiveView('active');
+            setCurrentPage(1);
+            setExpandedId(null);
+            setEditingId(null);
+          }}
+        >
+          Activas ({candidates.length})
+        </Button>
+
+        <Button
+          appearance={
+            activeView === 'archived' ? 'primary' : 'default'
+          }
+          onClick={() => {
+            setActiveView('archived');
+            setCurrentPage(1);
+            setExpandedId(null);
+            setEditingId(null);
+          }}
+        >
+          Archivadas ({archivedCandidates.length})
+        </Button>
+      </Inline>
+
+      {/* FILTRO */}
+
+      <Stack space="space.050">
+        <Text weight="semibold">Estado de revisión</Text>
+        <Select
+          options={FILTERS}
+          value={
+            FILTERS.find((o) => o.value === reviewFilter) ||
+            FILTERS[0]
+          }
+          onChange={(option) => {
+            setReviewFilter(option?.value || 'all');
+            setCurrentPage(1);
+          }}
+        />
+      </Stack>
+
+      {/* LISTADO */}
+
+      {loading ? (
+        <Spinner size="medium" />
+      ) : visibleCandidates.length === 0 ? (
+        <SectionMessage appearance="information">
+          <Text>
+            No hay decisiones que coincidan con este filtro.
+          </Text>
+        </SectionMessage>
+      ) : (
+        <Stack space="space.200">
+          {visibleCandidates.map(renderCandidate)}
+        </Stack>
+      )}
+
+      {/* PAGINACIÓN */}
+
+      <Inline
+        space="space.200"
+        alignBlock="center"
+        shouldWrap
+      >
+        <Button
+          isDisabled={safePage <= 1}
+          onClick={() => setCurrentPage(safePage - 1)}
+        >
+          Anterior
+        </Button>
+
+        <Text>
+          Página {safePage} de {totalPages}
+        </Text>
+
+        <Button
+          isDisabled={safePage >= totalPages}
+          onClick={() => setCurrentPage(safePage + 1)}
+        >
+          Siguiente
+        </Button>
+      </Inline>
+
+      <Text size="small">
+        Mostrando {visibleCandidates.length} de{' '}
+        {filteredCandidates.length} decisiones.
+      </Text>
+
+    </Stack>
+  );
+
+  // ==========================================================
+  // VISTA: INCORPORAR
+  // ==========================================================
+
+  const renderImport = () => (
+    <Stack space="space.400">
+
+      <Heading size="medium">
+        Incorporar decisiones
+      </Heading>
+
+      <Text>
+        Importa una minuta Markdown o registra una decisión
+        manualmente.
+      </Text>
+
+      {/* IMPORTACIÓN */}
+
+      <Box
+        padding="space.300"
+        backgroundColor="elevation.surface.raised"
+        borderRadius="medium"
+      >
+        <Stack space="space.200">
+
+          <Heading size="small">
+            Importar minuta Markdown
+          </Heading>
+
+          <Text>
+            Selecciona un archivo .md para extraer
+            automáticamente candidatos ADR.
+          </Text>
+
+          <FilePicker
+            onChange={handleFileChange}
+            accept=".md,text/markdown,text/plain"
+          />
+
+          {selectedFile && (
+            <Text size="small">
+              {selectedFile.name || 'Archivo seleccionado'}
+            </Text>
+          )}
+
+          <Inline space="space.100">
+            <Button
+              appearance="primary"
+              isDisabled={!selectedFile || busy}
+              onClick={handleImport}
+            >
+              Procesar minuta
+            </Button>
+          </Inline>
+
+          {importResult && (
+            <SectionMessage appearance="success">
+              <Stack space="space.050">
+                <Text>Minuta procesada correctamente.</Text>
+                <Text>
+                  Candidatos: {importResult.total_candidates}
+                </Text>
+                <Text>
+                  Nuevos: {importResult.inserted}
+                </Text>
+                <Text>
+                  Duplicados: {importResult.duplicates}
+                </Text>
+              </Stack>
+            </SectionMessage>
+          )}
+
+        </Stack>
+      </Box>
+
+      {/* CREACIÓN MANUAL */}
+
+      <Box
+        padding="space.300"
+        backgroundColor="elevation.surface.raised"
+        borderRadius="medium"
+      >
+        <Stack space="space.200">
+
+          <Heading size="small">
+            Crear candidato manual
+          </Heading>
+
+          <Field
+            label="Título"
+            value={manualForm.title}
+            onChange={(value) =>
+              setManualForm((p) => ({ ...p, title: value }))
+            }
+          />
+
+          <Field
+            label="Decisión"
+            multiline
+            value={manualForm.decision}
+            onChange={(value) =>
+              setManualForm((p) => ({ ...p, decision: value }))
+            }
+          />
+
+          <Field
+            label="Contexto"
+            multiline
+            value={manualForm.context}
+            onChange={(value) =>
+              setManualForm((p) => ({ ...p, context: value }))
+            }
+          />
+
+          <Field
+            label="Proyecto"
+            value={manualForm.job}
+            onChange={(value) =>
+              setManualForm((p) => ({ ...p, job: value }))
+            }
+          />
+
+          <Field
+            label="Responsable"
+            value={manualForm.decision_owner}
+            onChange={(value) =>
+              setManualForm((p) => ({
+                ...p,
+                decision_owner: value,
+              }))
+            }
+          />
+
+          <Field
+            label="Fecha (YYYY-MM-DD)"
+            value={manualForm.meeting_date}
+            onChange={(value) =>
+              setManualForm((p) => ({
+                ...p,
+                meeting_date: value,
+              }))
+            }
+          />
+
+          <Field
+            label="Referencia de origen"
+            value={manualForm.source_reference}
+            onChange={(value) =>
+              setManualForm((p) => ({
+                ...p,
+                source_reference: value,
+              }))
+            }
+          />
+
+          <Inline space="space.100">
+            <Button
+              appearance="primary"
+              isDisabled={busy}
+              onClick={handleCreateManual}
+            >
+              Crear candidato
+            </Button>
+
+            <Button
+              appearance="subtle"
+              onClick={() => setManualForm(EMPTY_FORM)}
+            >
+              Limpiar formulario
+            </Button>
+          </Inline>
+
+        </Stack>
+      </Box>
+
+    </Stack>
+  );
+
+  // ==========================================================
+  // VISTA: CONFIGURACIÓN
+  // ==========================================================
+
+  const renderSettings = () => (
+    <Stack space="space.300">
+
+      <Heading size="medium">
+        Configuración
+      </Heading>
+
+      <Box
+        padding="space.300"
+        backgroundColor="elevation.surface.raised"
+        borderRadius="medium"
+      >
+        <Stack space="space.300">
+
+          <Heading size="small">
+            Fuente de minutas
+          </Heading>
+
+          {googleLoading || driveConfigLoading ? (
+            <Inline space="space.100" alignBlock="center">
+              <Spinner size="small" />
+              <Text>Cargando configuración...</Text>
+            </Inline>
+          ) : (
+            <Stack space="space.200">
+
+              {/* ESTADO DE CONEXIÓN */}
+
+              <Inline
+                space="space.100"
+                alignBlock="center"
+                shouldWrap
+              >
+                <Lozenge
+                  appearance={
+                    googleAccount ? 'success' : 'default'
+                  }
+                >
+                  {googleAccount
+                    ? 'Conectado'
+                    : 'Desconectado'}
+                </Lozenge>
+
+                <Text>
+                  {googleAccount?.displayName ||
+                    'Google Drive'}
+                </Text>
+              </Inline>
+
+              {!googleAccount ? (
+                <Button
+                  appearance="primary"
+                  isDisabled={googleConnecting}
+                  onClick={handleConnectGoogle}
+                >
+                  {googleConnecting
+                    ? 'Conectando...'
+                    : 'Conectar Google Drive'}
+                </Button>
+              ) : (
+                <Stack space="space.200">
+
+                  {/* CARPETA CONFIGURADA */}
+
+                  <Box
+                    padding="space.200"
+                    backgroundColor="elevation.surface.sunken"
+                    borderRadius="medium"
+                  >
+                    <Stack space="space.100">
+                      <Text weight="semibold">
+                        Carpeta activa
+                      </Text>
+
+                      {savedDriveFolder ? (
+                        <Inline
+                          space="space.100"
+                          alignBlock="center"
+                        >
+                          <Lozenge appearance="success">
+                            Guardada
+                          </Lozenge>
+
+                          <Text>{savedDriveFolder.name}</Text>
+                        </Inline>
+                      ) : (
+                        <Text>
+                          No hay una carpeta configurada.
+                        </Text>
+                      )}
+                    </Stack>
+                  </Box>
+
+                  <Inline space="space.100">
+                    <Button
+                      appearance="subtle"
+                      onClick={handleToggleDriveSettings}
+                    >
+                      {showDriveSettings
+                        ? 'Ocultar configuración'
+                        : 'Cambiar carpeta'}
+                    </Button>
+                  </Inline>
+
+
+                    {/* ================================================ */}
+                    {/* SINCRONIZACIÓN DE MINUTAS */}
+                    {/* ================================================ */}
+
                     <Box
-                      padding="space.200"
-                      backgroundColor="elevation.surface.sunken"
+                      padding="space.300"
+                      backgroundColor="color.background.neutral"
                       borderRadius="medium"
                     >
                       <Stack space="space.200">
-                        <SectionMessage appearance="warning">
-                          <Stack space="space.100">
-                            <Text weight="semibold">
-                              ¿Eliminar definitivamente esta decisión?
-                            </Text>
-                            <Text>
-                              Esta acción borrará el registro de Forge SQL.
-                              No podrás recuperarlo desde Minerva ADR.
-                            </Text>
-                          </Stack>
-                        </SectionMessage>
 
-                        <Inline space="space.200" shouldWrap>
+                        <Heading size="small">
+                          Sincronización de minutas
+                        </Heading>
+
+                        <Text>
+                          Importa los archivos Markdown nuevos o
+                          modificados de la carpeta configurada.
+                        </Text>
+
+                        <Inline
+                          space="space.100"
+                          alignBlock="center"
+                          shouldWrap
+                        >
                           <Button
-                            appearance="danger"
-                            onClick={() => handleDelete(candidate.id)}
-                            isDisabled={updating !== null}
+                            appearance="primary"
+                            isDisabled={
+                              syncLoading ||
+                              !savedDriveFolder ||
+                              driveSaving
+                            }
+                            onClick={() => handleSyncDrive(false)}
                           >
-                            {isUpdating ? 'Eliminando...' : 'Sí, eliminar definitivamente'}
+                            {syncLoading
+                              ? 'Sincronizando...'
+                              : 'Sincronizar ahora'}
                           </Button>
 
                           <Button
                             appearance="default"
-                            onClick={() => setConfirmDeleteId(null)}
-                            isDisabled={updating !== null}
+                            isDisabled={
+                              syncLoading ||
+                              !savedDriveFolder ||
+                              driveSaving
+                            }
+                            onClick={() => handleSyncDrive(true)}
                           >
-                            Cancelar
+                            Reprocesar archivos
                           </Button>
+
+                          {syncLoading && (
+                            <Spinner size="small" />
+                          )}
                         </Inline>
+
+                        {syncLoading && (
+                          <Text size="small">
+                            Revisando carpetas, descargando minutas
+                            y extrayendo decisiones...
+                          </Text>
+                        )}
+
+                        {/* RESULTADO */}
+
+                        {syncResult && (
+                          <SectionMessage
+                            appearance={
+                              syncResult.errors?.length > 0
+                                ? 'warning'
+                                : 'success'
+                            }
+                          >
+                            <Stack space="space.150">
+
+                              <Text weight="semibold">
+                                Sincronización finalizada
+                              </Text>
+
+                              <Text>
+                                Carpeta: {syncResult.folder}
+                              </Text>
+
+                              <Inline space="space.100" shouldWrap>
+                                <Lozenge appearance="default">
+                                  Carpetas: {syncResult.foldersScanned}
+                                </Lozenge>
+
+                                <Lozenge appearance="default">
+                                  Procesados: {syncResult.filesProcessed}
+                                </Lozenge>
+
+                                <Lozenge appearance="success">
+                                  Nuevos ADR: {syncResult.inserted}
+                                </Lozenge>
+
+                                <Lozenge appearance="default">
+                                  Duplicados: {syncResult.duplicates}
+                                </Lozenge>
+                              </Inline>
+
+                              <Text size="small">
+                                Archivos sin cambios: {syncResult.filesUnchanged}
+                              </Text>
+
+                              <Text size="small">
+                                Candidatos detectados: {syncResult.candidatesFound}
+                              </Text>
+
+                              {syncResult.truncated && (
+                                <Text>
+                                  La exploración alcanzó un límite.
+                                  Puedes repetir la sincronización
+                                  para continuar revisando los archivos.
+                                </Text>
+                              )}
+
+                              {syncResult.errors?.length > 0 && (
+                                <Stack space="space.100">
+
+                                  <Text weight="semibold">
+                                    Errores ({syncResult.errors.length})
+                                  </Text>
+
+                                  {syncResult.errors.map((item, index) => (
+                                    <Box
+                                      key={`${item.file}-${index}`}
+                                      padding="space.100"
+                                      backgroundColor="elevation.surface.raised"
+                                      borderRadius="small"
+                                    >
+                                      <Stack space="space.050">
+                                        <Text weight="semibold">
+                                          {item.file}
+                                        </Text>
+                                        <Text size="small">
+                                          {item.message}
+                                        </Text>
+                                      </Stack>
+                                    </Box>
+                                  ))}
+
+                                </Stack>
+                              )}
+
+                            </Stack>
+                          </SectionMessage>
+                        )}
+
+                        {syncError && (
+                          <SectionMessage appearance="error">
+                            <Text>{syncError}</Text>
+                          </SectionMessage>
+                        )}
+
                       </Stack>
                     </Box>
+
+                  {/* CONFIGURACIÓN EXPANDIDA */}
+
+                  {showDriveSettings && (
+                    <Stack space="space.300">
+
+                      <Heading size="small">
+                        Seleccionar carpeta
+                      </Heading>
+
+                      {/* CARPETAS RECOMENDADAS */}
+
+                      {preferredLoading ? (
+                        <Spinner size="small" />
+                      ) : (
+                        <Stack space="space.100">
+
+                          <Text weight="semibold">
+                            Carpetas recomendadas
+                          </Text>
+
+                          {preferredFolders.length > 0 ? (
+                            <Inline
+                              space="space.100"
+                              shouldWrap
+                            >
+                              {preferredFolders.map((folder) => (
+                                <Button
+                                  key={folder.id}
+                                  appearance={
+                                    selectedDriveFolder?.id === folder.id
+                                      ? 'primary'
+                                      : 'default'
+                                  }
+                                  isDisabled={drivePreviewLoading}
+                                  onClick={() =>
+                                    handleSelectFolder(folder)
+                                  }
+                                >
+                                  {folder.name}
+                                </Button>
+                              ))}
+                            </Inline>
+                          ) : (
+                            <Text size="small">
+                              No se encontraron carpetas Minerva.
+                            </Text>
+                          )}
+
+                        </Stack>
+                      )}
+
+                      {/* BUSCADOR */}
+
+                      <Stack space="space.100">
+                        <Text weight="semibold">
+                          Buscar otra carpeta
+                        </Text>
+
+                        <Textfield
+                          value={driveQuery}
+                          placeholder="Nombre de la carpeta"
+                          onChange={(event) =>
+                            setDriveQuery(event.target.value)
+                          }
+                        />
+
+                        <Inline space="space.100">
+                          <Button
+                            isDisabled={
+                              driveSearching ||
+                              driveQuery.trim().length < 2
+                            }
+                            onClick={handleSearchFolders}
+                          >
+                            {driveSearching
+                              ? 'Buscando...'
+                              : 'Buscar'}
+                          </Button>
+                        </Inline>
+
+                        {driveMatches.map((folder) => (
+                          <Inline
+                            key={folder.id}
+                            space="space.100"
+                            alignBlock="center"
+                          >
+                            <Button
+                              appearance={
+                                selectedDriveFolder?.id === folder.id
+                                  ? 'primary'
+                                  : 'default'
+                              }
+                              onClick={() =>
+                                handleSelectFolder(folder)
+                              }
+                            >
+                              {folder.name}
+                            </Button>
+                          </Inline>
+                        ))}
+                      </Stack>
+
+                      {/* VISTA PREVIA */}
+
+                      {selectedDriveFolder && (
+                        <Box
+                          padding="space.200"
+                          backgroundColor="elevation.surface.sunken"
+                          borderRadius="medium"
+                        >
+                          <Stack space="space.200">
+
+                            <Text weight="semibold">
+                              {selectedDriveFolder.name}
+                            </Text>
+
+                            {drivePreviewLoading && (
+                              <Inline space="space.100">
+                                <Spinner size="small" />
+                                <Text>
+                                  Explorando archivos...
+                                </Text>
+                              </Inline>
+                            )}
+
+                            {drivePreview && (
+                              <Stack space="space.100">
+
+                                <Inline space="space.100">
+                                  <Lozenge appearance="default">
+                                    {drivePreview.foldersScanned} carpetas
+                                  </Lozenge>
+
+                                  <Lozenge appearance="success">
+                                    {drivePreview.totalMarkdown} Markdown
+                                  </Lozenge>
+                                </Inline>
+
+                                {drivePreview.truncated && (
+                                  <SectionMessage appearance="warning">
+                                    <Text>
+                                      La exploración es parcial.
+                                    </Text>
+                                  </SectionMessage>
+                                )}
+
+                                {drivePreview.files?.map((file) => (
+                                  <Text key={file.id} size="small">
+                                    {file.path}
+                                  </Text>
+                                ))}
+
+                              </Stack>
+                            )}
+
+                            <Button
+                              appearance="primary"
+                              isDisabled={
+                                driveSaving ||
+                                drivePreviewLoading ||
+                                !drivePreview ||
+                                selectedDriveFolder.id ===
+                                  savedDriveFolder?.id
+                              }
+                              onClick={handleSaveFolder}
+                            >
+                              {driveSaving
+                                ? 'Guardando...'
+                                : selectedDriveFolder.id ===
+                                    savedDriveFolder?.id
+                                  ? 'Carpeta guardada'
+                                  : 'Guardar esta carpeta'}
+                            </Button>
+
+                          </Stack>
+                        </Box>
+                      )}
+
+                    </Stack>
+                  )}
+
+                  {driveNotice && (
+                    <SectionMessage appearance="success">
+                      <Text>{driveNotice}</Text>
+                    </SectionMessage>
+                  )}
+
+                  {driveError && (
+                    <SectionMessage appearance="error">
+                      <Text>{driveError}</Text>
+                    </SectionMessage>
                   )}
 
                 </Stack>
-              </Box>
-            );
-          })}
+              )}
 
-          {/* PAGINACIÓN */}
-          {!isCurrentLoading && filteredCandidates.length > 0 && (
-            <Box
-              padding="space.200"
-              backgroundColor="elevation.surface"
-              borderColor="color.border"
-              borderWidth="border.width"
-              borderRadius="medium"
-            >
-              <Stack space="space.200">
-                <Text>
-                  Mostrando {firstVisible}–{lastVisible} de {filteredCandidates.length} decisiones
-                </Text>
+              {googleError && (
+                <SectionMessage appearance="error">
+                  <Text>{googleError}</Text>
+                </SectionMessage>
+              )}
 
-                <Inline alignBlock="center" space="space.200" shouldWrap>
-                  <Button
-                    appearance="default"
-                    onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
-                    isDisabled={safePage <= 1}
-                  >
-                    Anterior
-                  </Button>
-
-                  <Text>
-                    Página {safePage} de {totalPages}
-                  </Text>
-
-                  <Button
-                    appearance="default"
-                    onClick={() =>
-                      setCurrentPage((page) => Math.min(totalPages, page + 1))
-                    }
-                    isDisabled={safePage >= totalPages}
-                  >
-                    Siguiente
-                  </Button>
-                </Inline>
-              </Stack>
-            </Box>
+            </Stack>
           )}
 
         </Stack>
       </Box>
 
     </Stack>
+  );
+
+  // ==========================================================
+  // INTERFAZ PRINCIPAL
+  // ==========================================================
+
+  return (
+    <Box padding="space.400">
+      <Stack space="space.400">
+
+        {/* CABECERA */}
+
+        <Stack space="space.100">
+          <Heading size="large">Minerva ADR</Heading>
+          <Text>
+            Gestión de decisiones arquitectónicas
+            extraídas desde minutas de reuniones.
+          </Text>
+        </Stack>
+
+        {/* NAVEGACIÓN */}
+
+        <Inline space="space.100" shouldWrap>
+
+          <Button
+            appearance={
+              view === 'decisions' ? 'primary' : 'default'
+            }
+            onClick={() => setView('decisions')}
+          >
+            Decisiones
+          </Button>
+
+          <Button
+            appearance={
+              view === 'import' ? 'primary' : 'default'
+            }
+            onClick={() => setView('import')}
+          >
+            Incorporar
+          </Button>
+
+          <Button
+            appearance={
+              view === 'settings' ? 'primary' : 'default'
+            }
+            onClick={() => setView('settings')}
+          >
+            Configuración
+          </Button>
+
+        </Inline>
+
+        {/* MENSAJES */}
+
+        {error && (
+          <SectionMessage appearance="error">
+            <Inline space="space.100" shouldWrap>
+              <Text>{error}</Text>
+              <Button
+                appearance="subtle"
+                onClick={() => setError(null)}
+              >
+                Cerrar
+              </Button>
+            </Inline>
+          </SectionMessage>
+        )}
+
+        {notice && (
+          <SectionMessage appearance="success">
+            <Inline space="space.100" shouldWrap>
+              <Text>{notice}</Text>
+              <Button
+                appearance="subtle"
+                onClick={() => setNotice(null)}
+              >
+                Cerrar
+              </Button>
+            </Inline>
+          </SectionMessage>
+        )}
+
+        {/* CONTENIDO */}
+
+        {view === 'decisions' && renderDecisions()}
+        {view === 'import' && renderImport()}
+        {view === 'settings' && renderSettings()}
+
+      </Stack>
+    </Box>
   );
 };
 

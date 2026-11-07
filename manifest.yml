@@ -1,3 +1,4 @@
+
 modules:
   confluence:globalPage:
     - key: minerva-adr-forge-hello-world-global-page
@@ -11,6 +12,9 @@ modules:
   function:
     - key: resolver
       handler: index.handler
+      providers:
+        auth:
+          - google
 
     - key: run-migration
       handler: index.runMigration
@@ -27,6 +31,57 @@ modules:
 resources:
   - key: main
     path: src/frontend/index.jsx
+
+providers:
+  auth:
+    - key: google
+      name: Google
+      scopes:
+        - https://www.googleapis.com/auth/drive.readonly
+        - https://www.googleapis.com/auth/userinfo.email
+      type: oauth2
+      clientId: 688943911464-9uo4fkcajn8i1b72t68hlev6gk4peqqp.apps.googleusercontent.com
+      remotes:
+        - google-apis
+      bearerMethod: authorization-header
+      actions:
+        authorization:
+          remote: google-account
+          path: /o/oauth2/v2/auth
+          queryParameters:
+            access_type: offline
+        exchange:
+          remote: google-oauth
+          path: /token
+        refreshToken:
+          remote: google-oauth
+          path: /token
+        revokeToken:
+          remote: google-oauth
+          path: /revoke
+        retrieveProfile:
+          remote: google-apis
+          path: /userinfo/v2/me
+          resolvers:
+            id: id
+            displayName: email
+            avatarUrl: picture
+
+remotes:
+  - key: google-apis
+    baseUrl: https://www.googleapis.com
+  - key: google-account
+    baseUrl: https://accounts.google.com
+  - key: google-oauth
+    baseUrl: https://oauth2.googleapis.com
+
+permissions:
+  external:
+    fetch:
+      backend:
+        - address: https://www.googleapis.com
+        - address: https://accounts.google.com
+        - address: https://oauth2.googleapis.com
 
 app:
   runtime:

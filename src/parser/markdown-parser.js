@@ -5,6 +5,8 @@ function normalizeHeader(value) {
   return value
     .trim()
     .toLowerCase()
+    .replace(/\\([.!()[\]{}*_#+-])/g, '$1')
+    .replace(/^\d+[.)]\s*/, '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/\s+/g, ' ');
@@ -91,17 +93,29 @@ export function parseMarkdown(content, sourceFile = '') {
           .filter(([header, value]) => header && value !== undefined)
       );
 
-      const firstValue = cells[0] || '';
+      
 
-      if (firstValue) {
+        const firstValue = cells[0] || '';
+
+        const normalizedSection = normalizeHeader(currentSection);
+
+        // En la sección de avances, la información relevante
+        // está en la columna "Avance reportado".
+        const decisionText =
+        normalizedSection === 'avances reportados por proyecto'
+            ? columns['avance reportado'] || firstValue
+            : firstValue;
+
+        if (decisionText) {
         items.push({
-          text: firstValue,
-          context: cells.slice(1).filter(Boolean).join(' | '),
-          columns,
-          section: currentSection,
-          kind: 'table',
+            text: decisionText,
+            context: cells.slice(1).filter(Boolean).join(' | '),
+            columns,
+            section: currentSection,
+            kind: 'table',
         });
-      }
+        }
+
 
       continue;
     }
