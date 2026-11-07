@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Minerva ADR Forge
 
 Aplicación desarrollada sobre Atlassian Forge para gestionar decisiones
@@ -76,12 +75,8 @@ forge deploy --non-interactive --environment development
 ## Estado del proyecto
 
 En desarrollo. La integración automática con Google Drive está
-planificada.
+planificada. Se requieren permisos en workspace de Google.
 
 ## Licencia
 
 Por definir.
-=======
-# Minerva-ADR
-Minerva ADR – Plataforma de gestión de decisiones de arquitectura (ADR) integrada con Atlassian Confluence. Permite importar minutas en Markdown, extraer candidatos a decisiones, gestionar su revisión y mantener un registro centralizado de decisiones arquitectónicas.
->>>>>>> origin/main
