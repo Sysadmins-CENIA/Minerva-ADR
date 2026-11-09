@@ -28,10 +28,10 @@ modules:
     - key: run-migration
       handler: index.runMigration
 
-  scheduledTrigger:
-    - key: sql-schema-migration
-      function: run-migration
-      interval: fiveMinute
+  #scheduledTrigger:
+  #  - key: sql-schema-migration
+  #    function: run-migration
+  #    interval: fiveMinute
 
   sql:
     - key: minerva-adr-sql
