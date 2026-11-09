@@ -9,6 +9,15 @@ modules:
       title: Minerva-ADR-Forge
       route: hello-world
 
+  confluence:spacePage:
+    - key: minerva-adr-space-page
+      resource: main
+      render: native
+      resolver:
+        function: resolver
+      title: Minerva ADR
+      route: minerva-adr
+
   function:
     - key: resolver
       handler: index.handler
@@ -76,6 +85,8 @@ remotes:
     baseUrl: https://oauth2.googleapis.com
 
 permissions:
+  scopes:
+    - read:space:confluence
   external:
     fetch:
       backend:

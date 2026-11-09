@@ -1,9 +1,10 @@
 
-import api from '@forge/api';
+import api, { route } from '@forge/api';
 import { makeResolver } from '@forge/resolver';
 import { sql } from '@forge/sql';
-import { extractCandidates } from '../parser/extractor.js';
 import { randomUUID } from 'node:crypto';
+
+import { extractCandidates } from '../parser/extractor.js';
 import { syncDriveMarkdown } from '../google-drive/sync.js';
 
 const GOOGLE_REQUIRED_SCOPES = [
@@ -11,22 +12,174 @@ const GOOGLE_REQUIRED_SCOPES = [
   'https://www.googleapis.com/auth/userinfo.email',
 ];
 
-const GOOGLE_FOLDER_MIME = 'application/vnd.google-apps.folder';
+const GOOGLE_FOLDER_MIME =
+  'application/vnd.google-apps.folder';
+
+const DECISION_STATUSES = [
+  'Propuesto',
+  'En discusión',
+  'Aprobada',
+  'Rechazada',
+  'Obsoleta',
+];
+
+const REVIEW_STATUSES = [
+  'Pendiente de revisión',
+  'Validado',
+  'Descartado',
+];
+
+const ADR_COLUMNS = `
+  id, title, decision, context, job, status,
+  review_status, decision_owner, source_file,
+  source_file_id, source_type, source_reference,
+  meeting_date, evidence, created_at, updated_at,
+  archived_at
+`;
 
 // ============================================================
-// GOOGLE DRIVE - FUNCIONES AUXILIARES
+// CONTEXTO Y SEGURIDAD
+// ============================================================
+
+function getAccountId(context) {
+  const id = context?.accountId;
+
+  if (typeof id !== 'string' || !id.trim()) {
+    throw new Error(
+      'No fue posible identificar al usuario de Atlassian.'
+    );
+  }
+
+  return id;
+}
+
+function getSpaceId(context) {
+  // Obtener el espacio exclusivamente del contexto
+  // proporcionado por Forge, nunca desde payload.
+  const id = context?.extension?.space?.id;
+
+  if (
+    (typeof id !== 'string' &&
+      typeof id !== 'number') ||
+    !String(id).trim()
+  ) {
+    throw new Error(
+      'Abre Minerva ADR desde un espacio de Confluence.'
+    );
+  }
+
+  const spaceId = String(id);
+
+  if (!/^[0-9]+$/.test(spaceId)) {
+    throw new Error(
+      'Identificador de espacio no válido.'
+    );
+  }
+
+  return spaceId;
+}
+
+async function authorizedSpace(context) {
+  getAccountId(context);
+
+  const spaceId = getSpaceId(context);
+
+  // Confluence comprueba el acceso del usuario real.
+  const response = await api
+    .asUser()
+    .requestConfluence(
+      route`/wiki/api/v2/spaces/${spaceId}`,
+      {
+        headers: {
+          Accept: 'application/json',
+        },
+      }
+    );
+
+  if (!response.ok) {
+    throw new Error(
+      'No tienes acceso al espacio de Confluence.'
+    );
+  }
+
+  return spaceId;
+}
+
+function assertId(id) {
+  if (
+    typeof id !== 'string' ||
+    !/^[0-9a-fA-F-]{36}$/.test(id)
+  ) {
+    throw new Error('Identificador ADR no válido.');
+  }
+
+  return id;
+}
+
+function optionalText(value, maxLength = null) {
+  if (value == null || value === '') {
+    return null;
+  }
+
+  if (typeof value !== 'string') {
+    throw new Error('El campo debe contener texto.');
+  }
+
+  const text = value.trim();
+
+  if (maxLength && text.length > maxLength) {
+    throw new Error(
+      `El campo supera ${maxLength} caracteres.`
+    );
+  }
+
+  return text || null;
+}
+
+function requiredText(value, maxLength = null) {
+  const result = optionalText(value, maxLength);
+
+  if (!result) {
+    throw new Error('Falta un campo obligatorio.');
+  }
+
+  return result;
+}
+
+function optionalDate(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (
+    typeof value !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(value)
+  ) {
+    throw new Error(
+      'La fecha debe tener el formato YYYY-MM-DD.'
+    );
+  }
+
+  return value;
+}
+
+// ============================================================
+// GOOGLE OAUTH
 // ============================================================
 
 function driveClient() {
-  return api.asUser().withProvider('google', 'google-apis');
+  return api
+    .asUser()
+    .withProvider('google', 'google-apis');
 }
 
 async function authorizedDriveClient() {
   const google = driveClient();
 
-  const hasCredentials = await google.hasCredentials(
-    GOOGLE_REQUIRED_SCOPES
-  );
+  const hasCredentials =
+    await google.hasCredentials(
+      GOOGLE_REQUIRED_SCOPES
+    );
 
   if (!hasCredentials) {
     throw new Error(
@@ -37,15 +190,55 @@ async function authorizedDriveClient() {
   return google;
 }
 
-async function driveGet(google, path, parameters = {}) {
+async function googleAccount() {
+  const google = driveClient();
+
+  const connected = await google.hasCredentials(
+    GOOGLE_REQUIRED_SCOPES
+  );
+
+  if (!connected) {
+    return {
+      success: true,
+      connected: false,
+      account: null,
+    };
+  }
+
+  const account = await google.getAccount();
+
+  return {
+    success: true,
+    connected: Boolean(account),
+    account: account
+      ? {
+          id: account.id,
+          displayName: account.displayName,
+          scopes: account.scopes || [],
+        }
+      : null,
+  };
+}
+
+// ============================================================
+// GOOGLE DRIVE - API
+// ============================================================
+
+async function driveGet(
+  google,
+  path,
+  parameters = {}
+) {
   const query = new URLSearchParams(parameters);
+  const suffix = query.toString();
 
   const response = await google.fetch(
-    `${path}?${query.toString()}`
+    suffix ? `${path}?${suffix}` : path
   );
 
   if (!response.ok) {
-    const body = (await response.text()).slice(0, 700);
+    const body = (await response.text())
+      .slice(0, 700);
 
     throw new Error(
       `Google Drive respondió ${response.status}: ${body}`
@@ -82,7 +275,7 @@ async function driveList(
 
     files.push(...(data.files || []));
     pageToken = data.nextPageToken;
-    pages += 1;
+    pages++;
   } while (pageToken && pages < maxPages);
 
   return {
@@ -91,7 +284,7 @@ async function driveList(
   };
 }
 
-function driveFolderResult(file) {
+function folderResult(file) {
   return {
     id: file.id,
     name: file.name,
@@ -99,19 +292,52 @@ function driveFolderResult(file) {
   };
 }
 
-function getAtlassianAccountId(context) {
-  const accountId = context?.accountId;
+function validFolderId(value) {
+  return typeof value === 'string' &&
+    /^[a-zA-Z0-9_-]{5,255}$/.test(value);
+}
 
-  if (
-    typeof accountId !== 'string' ||
-    !accountId.trim()
-  ) {
+// ============================================================
+// ADR - CONSULTAS AUXILIARES
+// ============================================================
+
+async function candidateExists(
+  id,
+  spaceId,
+  archiveCondition = ''
+) {
+  const result = await sql
+    .prepare(`
+      SELECT id
+      FROM adr_candidates
+      WHERE id = ?
+        AND space_id = ?
+        ${archiveCondition}
+      LIMIT 1
+    `)
+    .bindParams(id, spaceId)
+    .execute();
+
+  if (result.rows.length === 0) {
     throw new Error(
-      'No fue posible identificar al usuario de Atlassian.'
+      'La decisión no existe en este espacio.'
     );
   }
+}
 
-  return accountId;
+async function hashExists(hash, spaceId) {
+  const result = await sql
+    .prepare(`
+      SELECT id
+      FROM adr_candidates
+      WHERE source_hash = ?
+        AND space_id = ?
+      LIMIT 1
+    `)
+    .bindParams(hash, spaceId)
+    .execute();
+
+  return result.rows.length > 0;
 }
 
 // ============================================================
@@ -120,22 +346,22 @@ function getAtlassianAccountId(context) {
 
 export const handler = makeResolver({
 
-  // ==========================================================
+  // ----------------------------------------------------------
   // GOOGLE OAUTH
-  // ==========================================================
+  // ----------------------------------------------------------
 
-  connectGoogle: async () => {
-    const google = api
-      .asUser()
-      .withProvider('google', 'google-apis');
+  connectGoogle: async ({ context }) => {
+    await authorizedSpace(context);
 
-    const hasCredentials = await google.hasCredentials(
+    const google = driveClient();
+
+    const connected = await google.hasCredentials(
       GOOGLE_REQUIRED_SCOPES
     );
 
-    if (!hasCredentials) {
-      // Forge interrumpe el resolver para solicitar OAuth.
-      // No envolver requestCredentials en un catch.
+    if (!connected) {
+      // No envolver en try/catch:
+      // Forge necesita gestionar el flujo OAuth.
       await google.requestCredentials(
         GOOGLE_REQUIRED_SCOPES
       );
@@ -147,96 +373,21 @@ export const handler = makeResolver({
       };
     }
 
-    try {
-      const account = await google.getAccount();
-
-      if (!account) {
-        return {
-          success: true,
-          connected: false,
-          account: null,
-        };
-      }
-
-      return {
-        success: true,
-        connected: true,
-        account: {
-          id: account.id,
-          displayName: account.displayName,
-          scopes: account.scopes || [],
-        },
-      };
-    } catch (error) {
-      console.error(
-        '[Minerva ADR] Error al obtener cuenta Google:',
-        error
-      );
-
-      throw new Error(
-        `Error al obtener cuenta Google: ${
-          error?.message || 'Error desconocido'
-        }`
-      );
-    }
+    return googleAccount();
   },
 
-  getGoogleAccount: async () => {
-    const google = api
-      .asUser()
-      .withProvider('google', 'google-apis');
-
-    try {
-      const connected = await google.hasCredentials(
-        GOOGLE_REQUIRED_SCOPES
-      );
-
-      if (!connected) {
-        return {
-          success: true,
-          connected: false,
-          account: null,
-        };
-      }
-
-      const account = await google.getAccount();
-
-      if (!account) {
-        return {
-          success: true,
-          connected: false,
-          account: null,
-        };
-      }
-
-      return {
-        success: true,
-        connected: true,
-        account: {
-          id: account.id,
-          displayName: account.displayName,
-          scopes: account.scopes || [],
-        },
-      };
-    } catch (error) {
-      console.error(
-        '[Minerva ADR] Error al consultar Google:',
-        error
-      );
-
-      throw new Error(
-        `No fue posible consultar la cuenta de Google: ${
-          error?.message || 'Error desconocido'
-        }`
-      );
-    }
+  getGoogleAccount: async ({ context }) => {
+    await authorizedSpace(context);
+    return googleAccount();
   },
 
-  // ==========================================================
-  // GOOGLE DRIVE - CARPETA MINERVA
-  // ==========================================================
+  // ----------------------------------------------------------
+  // GOOGLE DRIVE - CARPETAS PREFERIDAS
+  // ----------------------------------------------------------
 
-  getPreferredDriveFolders: async () => {
+  getPreferredDriveFolders: async ({ context }) => {
+    await authorizedSpace(context);
+
     const google = await authorizedDriveClient();
 
     const root = await driveGet(
@@ -256,24 +407,32 @@ export const handler = makeResolver({
     );
 
     files.sort((a, b) => {
-      const aInRoot = (a.parents || []).includes(root.id);
-      const bInRoot = (b.parents || []).includes(root.id);
+      const aRoot = (a.parents || [])
+        .includes(root.id);
 
-      return Number(bInRoot) - Number(aInRoot);
+      const bRoot = (b.parents || [])
+        .includes(root.id);
+
+      return Number(bRoot) - Number(aRoot);
     });
 
     return {
       success: true,
-      folders: files.map(driveFolderResult),
+      folders: files.map(folderResult),
       truncated,
     };
   },
 
-  // ==========================================================
-  // GOOGLE DRIVE - BUSCADOR DE CARPETAS
-  // ==========================================================
+  // ----------------------------------------------------------
+  // GOOGLE DRIVE - BÚSQUEDA
+  // ----------------------------------------------------------
 
-  searchDriveFolders: async ({ payload }) => {
+  searchDriveFolders: async ({
+    payload,
+    context,
+  }) => {
+    await authorizedSpace(context);
+
     const term = String(
       payload?.query || ''
     ).trim();
@@ -312,29 +471,30 @@ export const handler = makeResolver({
       const exactB =
         b.name.toLowerCase() === term.toLowerCase();
 
-      return (
-        Number(exactB) - Number(exactA) ||
-        a.name.localeCompare(b.name)
-      );
+      return Number(exactB) - Number(exactA) ||
+        a.name.localeCompare(b.name);
     });
 
     return {
       success: true,
-      folders: files.map(driveFolderResult),
+      folders: files.map(folderResult),
       truncated,
     };
   },
 
-  // ==========================================================
-  // GOOGLE DRIVE - EXPLORACIÓN RECURSIVA
-  // ==========================================================
+  // ----------------------------------------------------------
+  // GOOGLE DRIVE - PREVISUALIZAR CARPETA
+  // ----------------------------------------------------------
 
-  previewDriveFolder: async ({ payload }) => {
-    const folderId = String(
-      payload?.folderId || ''
-    ).trim();
+  previewDriveFolder: async ({
+    payload,
+    context,
+  }) => {
+    await authorizedSpace(context);
 
-    if (!/^[a-zA-Z0-9_-]{5,255}$/.test(folderId)) {
+    const folderId = payload?.folderId;
+
+    if (!validFolderId(folderId)) {
       throw new Error(
         'Identificador de carpeta no válido.'
       );
@@ -357,15 +517,14 @@ export const handler = makeResolver({
       );
     }
 
-    const queue = [
-      {
-        id: folder.id,
-        path: folder.name,
-      },
-    ];
+    const queue = [{
+      id: folder.id,
+      path: folder.name,
+    }];
 
     const visited = new Set();
     const markdownFiles = [];
+
     let truncated = false;
 
     while (
@@ -431,412 +590,281 @@ export const handler = makeResolver({
     };
   },
 
-  // ==========================================================
-  // GOOGLE DRIVE - RECUPERAR CARPETA CONFIGURADA
-  // ==========================================================
+  // ----------------------------------------------------------
+  // GOOGLE DRIVE - CONFIGURACIÓN POR ESPACIO
+  // ----------------------------------------------------------
 
   getDriveFolderConfig: async ({ context }) => {
-    const accountId = getAtlassianAccountId(context);
+    const spaceId = await authorizedSpace(context);
 
-    try {
-      const result = await sql
-        .prepare(`
-          SELECT
-            folder_id,
-            folder_name,
-            created_at,
-            updated_at
-          FROM drive_user_config
-          WHERE account_id = ?
-          LIMIT 1
-        `)
-        .bindParams(accountId)
-        .execute();
+    const result = await sql
+      .prepare(`
+        SELECT folder_id, folder_name
+        FROM drive_space_config
+        WHERE space_id = ?
+        LIMIT 1
+      `)
+      .bindParams(spaceId)
+      .execute();
 
-      if (result.rows.length === 0) {
-        return {
-          success: true,
-          configured: false,
-          folder: null,
-        };
-      }
-
-      const config = result.rows[0];
-
+    if (result.rows.length === 0) {
       return {
         success: true,
-        configured: true,
-        folder: {
-          id: config.folder_id,
-          name: config.folder_name,
-        },
+        configured: false,
+        folder: null,
       };
-    } catch (error) {
-      console.error(
-        '[Minerva ADR] Error al recuperar carpeta:',
-        error
-      );
-
-      throw new Error(
-        'No fue posible recuperar la carpeta configurada.'
-      );
     }
+
+    const config = result.rows[0];
+
+    return {
+      success: true,
+      configured: true,
+      folder: {
+        id: config.folder_id,
+        name: config.folder_name,
+      },
+    };
   },
 
-  // ==========================================================
-  // GOOGLE DRIVE - GUARDAR CARPETA POR USUARIO
-  // ==========================================================
+  saveDriveFolderConfig: async ({
+    payload,
+    context,
+  }) => {
+    const spaceId = await authorizedSpace(context);
+    const accountId = getAccountId(context);
 
-  saveDriveFolderConfig: async ({ payload, context }) => {
-    const accountId = getAtlassianAccountId(context);
     const folderId = payload?.folderId;
 
-    if (
-      typeof folderId !== 'string' ||
-      !/^[a-zA-Z0-9_-]{5,255}$/.test(folderId)
-    ) {
+    if (!validFolderId(folderId)) {
       throw new Error(
         'El identificador de la carpeta no es válido.'
       );
     }
 
-    try {
-      const google = await authorizedDriveClient();
+    const google = await authorizedDriveClient();
 
-      // Verificar la carpeta directamente en Google Drive.
-      const folder = await driveGet(
-        google,
-        `/drive/v3/files/${encodeURIComponent(folderId)}`,
-        {
-          fields: 'id,name,mimeType,trashed',
-          supportsAllDrives: 'true',
-        }
-      );
-
-      if (
-        folder.mimeType !== GOOGLE_FOLDER_MIME ||
-        folder.trashed === true
-      ) {
-        throw new Error(
-          'La carpeta seleccionada no existe o no es válida.'
-        );
+    const folder = await driveGet(
+      google,
+      `/drive/v3/files/${encodeURIComponent(folderId)}`,
+      {
+        fields: 'id,name,mimeType,trashed',
+        supportsAllDrives: 'true',
       }
-
-      if (
-        typeof folder.name !== 'string' ||
-        !folder.name.trim() ||
-        folder.name.length > 500
-      ) {
-        throw new Error(
-          'El nombre de la carpeta no es válido.'
-        );
-      }
-
-      await sql
-        .prepare(`
-          INSERT INTO drive_user_config (
-            account_id,
-            folder_id,
-            folder_name
-          )
-          VALUES (?, ?, ?)
-          ON DUPLICATE KEY UPDATE
-            folder_id = VALUES(folder_id),
-            folder_name = VALUES(folder_name),
-            updated_at = CURRENT_TIMESTAMP
-        `)
-        .bindParams(
-          accountId,
-          folder.id,
-          folder.name
-        )
-        .execute();
-
-      console.log(
-        '[Minerva ADR] Carpeta de Drive configurada'
-      );
-
-      return {
-        success: true,
-        configured: true,
-        folder: {
-          id: folder.id,
-          name: folder.name,
-        },
-        message: 'Carpeta guardada correctamente.',
-      };
-    } catch (error) {
-      console.error(
-        '[Minerva ADR] Error al guardar carpeta:',
-        error
-      );
-
-      throw new Error(
-        `No fue posible guardar la carpeta: ${
-          error?.message || 'Error desconocido'
-        }`
-      );
-    }
-  },
-
-  // ==========================================================
-  // GOOGLE DRIVE - SINCRONIZACIÓN DE MINUTAS
-  // ==========================================================
-
-  syncDriveMarkdown: async ({ context, payload }) => {
-    try {
-      const reprocess = payload?.reprocess === true;
-
-      console.log(
-        '[Minerva ADR] Solicitud de sincronización recibida'
-      );
-
-      return await syncDriveMarkdown(context, {
-        reprocess,
-      });
-    } catch (error) {
-      console.error(
-        '[Minerva ADR] Error de sincronización:',
-        error
-      );
-
-      throw new Error(
-        `No fue posible sincronizar Google Drive: ${
-          error?.message || 'Error desconocido'
-        }`
-      );
-    }
-  },
-
-
-  // ==========================================================
-  // ADR - CONSULTAR CANDIDATOS ACTIVOS
-  // ==========================================================
-
-  getCandidates: async () => {
-    try {
-      const result = await sql
-        .prepare(`
-          SELECT
-            id,
-            title,
-            decision,
-            context,
-            job,
-            status,
-            review_status,
-            decision_owner,
-            source_file,
-            source_type,
-            source_reference,
-            meeting_date,
-            evidence,
-            created_at,
-            updated_at
-          FROM adr_candidates
-          WHERE archived_at IS NULL
-          ORDER BY created_at DESC
-        `)
-        .execute();
-
-      return {
-        success: true,
-        candidates: result.rows,
-      };
-    } catch (error) {
-      console.error(
-        '[Minerva ADR] Error al consultar candidatos:',
-        error
-      );
-
-      throw new Error(
-        'No fue posible consultar los candidatos ADR.'
-      );
-    }
-  },
-
-  // ==========================================================
-  // ADR - CONSULTAR ARCHIVADOS
-  // ==========================================================
-
-  getArchivedCandidates: async () => {
-    try {
-      const result = await sql
-        .prepare(`
-          SELECT
-            id,
-            title,
-            decision,
-            context,
-            job,
-            status,
-            review_status,
-            decision_owner,
-            source_file,
-            source_type,
-            source_reference,
-            meeting_date,
-            evidence,
-            created_at,
-            updated_at,
-            archived_at
-          FROM adr_candidates
-          WHERE archived_at IS NOT NULL
-          ORDER BY archived_at DESC
-        `)
-        .execute();
-
-      return {
-        success: true,
-        candidates: result.rows,
-      };
-    } catch (error) {
-      console.error(
-        '[Minerva ADR] Error al consultar archivados:',
-        error
-      );
-
-      throw new Error(
-        'No fue posible consultar las decisiones archivadas.'
-      );
-    }
-  },
-
-  // ==========================================================
-  // ADR - CREACIÓN MANUAL
-  // ==========================================================
-
-  createManualCandidate: async ({ payload }) => {
-    const {
-      title,
-      decision,
-      context,
-      job,
-      decision_owner,
-      meeting_date,
-      source_reference,
-    } = payload || {};
+    );
 
     if (
-      typeof title !== 'string' ||
-      !title.trim() ||
-      title.trim().length > 255 ||
-      typeof decision !== 'string' ||
-      !decision.trim()
+      folder.mimeType !== GOOGLE_FOLDER_MIME ||
+      folder.trashed === true
     ) {
       throw new Error(
-        'Debes proporcionar un título y una decisión válidos.'
+        'La carpeta seleccionada no es válida.'
       );
     }
 
-    if (
-      (context != null && typeof context !== 'string') ||
-      (job != null && typeof job !== 'string') ||
-      (
-        decision_owner != null &&
-        typeof decision_owner !== 'string'
-      ) ||
-      (
-        source_reference != null &&
-        typeof source_reference !== 'string'
-      ) ||
-      (
-        meeting_date != null &&
-        typeof meeting_date !== 'string'
+    const name = requiredText(folder.name, 500);
+
+    await sql
+      .prepare(`
+        INSERT INTO drive_space_config (
+          space_id,
+          folder_id,
+          folder_name,
+          configured_by_account_id
+        )
+        VALUES (?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          folder_id = VALUES(folder_id),
+          folder_name = VALUES(folder_name),
+          configured_by_account_id =
+            VALUES(configured_by_account_id),
+          updated_at = CURRENT_TIMESTAMP
+      `)
+      .bindParams(
+        spaceId,
+        folder.id,
+        name,
+        accountId
       )
-    ) {
-      throw new Error(
-        'Uno o más campos opcionales no son válidos.'
-      );
-    }
+      .execute();
 
-    if (
-      (job || '').trim().length > 50 ||
-      (decision_owner || '').trim().length > 255 ||
-      (source_reference || '').trim().length > 500
-    ) {
-      throw new Error(
-        'Uno de los campos supera la longitud permitida.'
-      );
-    }
-
-    if (
-      meeting_date &&
-      !/^\d{4}-\d{2}-\d{2}$/.test(meeting_date)
-    ) {
-      throw new Error(
-        'La fecha debe tener el formato YYYY-MM-DD.'
-      );
-    }
-
-    try {
-      const id = randomUUID();
-
-      await sql
-        .prepare(`
-          INSERT INTO adr_candidates (
-            id,
-            title,
-            decision,
-            context,
-            job,
-            status,
-            review_status,
-            decision_owner,
-            source_type,
-            source_reference,
-            source_file,
-            meeting_date,
-            source_hash,
-            evidence
-          )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `)
-        .bindParams(
-          id,
-          title.trim(),
-          decision.trim(),
-          context?.trim() || null,
-          job?.trim() || null,
-          'Propuesto',
-          'Pendiente de revisión',
-          decision_owner?.trim() || null,
-          'manual',
-          source_reference?.trim() || null,
-          null,
-          meeting_date || null,
-          null,
-          null
-        )
-        .execute();
-
-      return {
-        success: true,
-        id,
-        message:
-          'Candidato manual creado y enviado a revisión.',
-      };
-    } catch (error) {
-      console.error(
-        '[Minerva ADR] Error al crear candidato manual:',
-        error
-      );
-
-      throw new Error(
-        'No fue posible crear el candidato manual.'
-      );
-    }
+    return {
+      success: true,
+      configured: true,
+      folder: {
+        id: folder.id,
+        name,
+      },
+      message: 'Carpeta guardada correctamente.',
+    };
   },
 
-  // ==========================================================
-  // ADR - PROCESAR MARKDOWN
-  // ==========================================================
+  // ----------------------------------------------------------
+  // GOOGLE DRIVE - SINCRONIZACIÓN
+  // ----------------------------------------------------------
 
-  processMarkdown: async ({ payload }) => {
-    const {
-      data,
-      sourceFile,
-    } = payload || {};
+syncDriveMarkdown: async ({ context, payload }) => {
+  const spaceId = await authorizedSpace(context);
+
+  return syncDriveMarkdown(context, {
+    spaceId,
+    reprocess: payload?.reprocess === true,
+  });
+},
+
+  // ----------------------------------------------------------
+  // ADR - CANDIDATOS ACTIVOS
+  // ----------------------------------------------------------
+
+  getCandidates: async ({ context }) => {
+    const spaceId = await authorizedSpace(context);
+
+    const result = await sql
+      .prepare(`
+        SELECT ${ADR_COLUMNS}
+        FROM adr_candidates
+        WHERE space_id = ?
+          AND archived_at IS NULL
+        ORDER BY created_at DESC
+      `)
+      .bindParams(spaceId)
+      .execute();
+
+    return {
+      success: true,
+      candidates: result.rows,
+    };
+  },
+
+  // ----------------------------------------------------------
+  // ADR - CANDIDATOS ARCHIVADOS
+  // ----------------------------------------------------------
+
+  getArchivedCandidates: async ({ context }) => {
+    const spaceId = await authorizedSpace(context);
+
+    const result = await sql
+      .prepare(`
+        SELECT ${ADR_COLUMNS}
+        FROM adr_candidates
+        WHERE space_id = ?
+          AND archived_at IS NOT NULL
+        ORDER BY archived_at DESC
+      `)
+      .bindParams(spaceId)
+      .execute();
+
+    return {
+      success: true,
+      candidates: result.rows,
+    };
+  },
+
+  // ----------------------------------------------------------
+  // ADR - CREAR MANUALMENTE
+  // ----------------------------------------------------------
+
+  createManualCandidate: async ({
+    payload,
+    context,
+  }) => {
+    const spaceId = await authorizedSpace(context);
+
+    const title = requiredText(
+      payload?.title,
+      255
+    );
+
+    const decision = requiredText(
+      payload?.decision
+    );
+
+    const job = optionalText(
+      payload?.job,
+      50
+    );
+
+    const owner = optionalText(
+      payload?.decision_owner,
+      255
+    );
+
+    const contextText = optionalText(
+      payload?.context
+    );
+
+    const sourceReference = optionalText(
+      payload?.source_reference,
+      500
+    );
+
+    const meetingDate = optionalDate(
+      payload?.meeting_date
+    );
+
+    const id = randomUUID();
+
+    await sql
+      .prepare(`
+        INSERT INTO adr_candidates (
+          id,
+          space_id,
+          title,
+          decision,
+          context,
+          job,
+          status,
+          review_status,
+          decision_owner,
+          source_type,
+          source_reference,
+          source_file,
+          meeting_date,
+          source_hash,
+          evidence
+        )
+        VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+      `)
+      .bindParams(
+        id,
+        spaceId,
+        title,
+        decision,
+        contextText,
+        job,
+        'Propuesto',
+        'Pendiente de revisión',
+        owner,
+        'manual',
+        sourceReference,
+        null,
+        meetingDate,
+        null,
+        null
+      )
+      .execute();
+
+    return {
+      success: true,
+      id,
+      message:
+        'Candidato manual creado y enviado a revisión.',
+    };
+  },
+
+  // ----------------------------------------------------------
+  // ADR - IMPORTAR MARKDOWN MANUALMENTE
+  // ----------------------------------------------------------
+
+  processMarkdown: async ({
+    payload,
+    context,
+  }) => {
+    const spaceId = await authorizedSpace(context);
+
+    const { data, sourceFile } = payload || {};
 
     if (
       typeof data !== 'string' ||
@@ -849,493 +877,336 @@ export const handler = makeResolver({
       );
     }
 
-    try {
-      const content = Buffer
-        .from(data, 'base64')
-        .toString('utf8');
+    if (
+      Buffer.byteLength(data, 'utf8') >
+      2 * 1024 * 1024
+    ) {
+      throw new Error(
+        'El Markdown supera el tamaño permitido.'
+      );
+    }
 
-      if (!content.trim()) {
-        throw new Error(
-          'El archivo está vacío o no contiene texto válido.'
-        );
+    const content = Buffer
+      .from(data, 'base64')
+      .toString('utf8');
+
+    if (!content.trim()) {
+      throw new Error(
+        'El archivo está vacío.'
+      );
+    }
+
+    const extraction = extractCandidates(
+      content,
+      sourceFile
+    );
+
+    let inserted = 0;
+    let duplicates = 0;
+
+    for (const candidate of extraction.candidates) {
+      if (
+        await hashExists(
+          candidate.source_hash,
+          spaceId
+        )
+      ) {
+        duplicates++;
+        continue;
       }
 
-      const extraction = extractCandidates(
-        content,
-        sourceFile
-      );
-
-      let inserted = 0;
-      let duplicates = 0;
-
-      for (const candidate of extraction.candidates) {
-        const existing = await sql
-          .prepare(`
-            SELECT id
-            FROM adr_candidates
-            WHERE source_hash = ?
-            LIMIT 1
-          `)
-          .bindParams(candidate.source_hash)
-          .execute();
-
-        if (existing.rows.length > 0) {
-          duplicates++;
-          continue;
-        }
-
-        await sql
-          .prepare(`
-            INSERT INTO adr_candidates (
-              id,
-              title,
-              decision,
-              context,
-              job,
-              status,
-              review_status,
-              decision_owner,
-              source_file,
-              meeting_date,
-              source_hash,
-              evidence
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `)
-          .bindParams(
-            candidate.id,
-            candidate.title,
-            candidate.decision,
-            candidate.context,
-            candidate.job,
-            candidate.status,
-            candidate.review_status,
-            candidate.decision_owner,
-            candidate.source_file,
-            candidate.meeting_date,
-            candidate.source_hash,
-            JSON.stringify(candidate.evidence)
+      await sql
+        .prepare(`
+          INSERT INTO adr_candidates (
+            id,
+            space_id,
+            title,
+            decision,
+            context,
+            job,
+            status,
+            review_status,
+            decision_owner,
+            source_file,
+            source_type,
+            meeting_date,
+            source_hash,
+            evidence
           )
-          .execute();
-
-        inserted++;
-      }
-
-      return {
-        success: true,
-        meeting_title: extraction.meeting_title,
-        meeting_date: extraction.meeting_date,
-        source_file: extraction.source_file,
-        total_candidates: extraction.candidates.length,
-        inserted,
-        duplicates,
-        warnings: extraction.warnings,
-      };
-    } catch (error) {
-      console.error(
-        '[Minerva ADR] Error al procesar minuta:',
-        error
-      );
-
-      throw new Error(
-        'No fue posible procesar y almacenar la minuta.'
-      );
-    }
-  },
-
-  // ==========================================================
-  // ADR - ACTUALIZAR REVISIÓN
-  // ==========================================================
-
-  updateReviewStatus: async ({ payload }) => {
-    const {
-      id,
-      reviewStatus,
-    } = payload || {};
-
-    const allowedStatuses = [
-      'Validado',
-      'Descartado',
-    ];
-
-    if (
-      typeof id !== 'string' ||
-      !id.trim() ||
-      !allowedStatuses.includes(reviewStatus)
-    ) {
-      throw new Error(
-        'Los datos de revisión no son válidos.'
-      );
-    }
-
-    try {
-      const existing = await sql
-        .prepare(`
-          SELECT id
-          FROM adr_candidates
-          WHERE id = ?
-          LIMIT 1
-        `)
-        .bindParams(id)
-        .execute();
-
-      if (existing.rows.length === 0) {
-        throw new Error(
-          'El candidato ADR no existe.'
-        );
-      }
-
-      await sql
-        .prepare(`
-          UPDATE adr_candidates
-          SET
-            review_status = ?,
-            updated_at = CURRENT_TIMESTAMP
-          WHERE id = ?
-        `)
-        .bindParams(reviewStatus, id)
-        .execute();
-
-      return {
-        success: true,
-        id,
-        review_status: reviewStatus,
-      };
-    } catch (error) {
-      console.error(
-        '[Minerva ADR] Error al actualizar revisión:',
-        error
-      );
-
-      throw new Error(
-        'No fue posible actualizar el estado de revisión.'
-      );
-    }
-  },
-
-  // ==========================================================
-  // ADR - EDITAR CANDIDATO
-  // ==========================================================
-
-  updateCandidate: async ({ payload }) => {
-    const {
-      id,
-      title,
-      decision,
-      context,
-      job,
-      decision_owner,
-      status,
-      review_status,
-    } = payload || {};
-
-    const allowedStatuses = [
-      'Propuesto',
-      'En discusión',
-      'Aprobada',
-      'Rechazada',
-      'Obsoleta',
-    ];
-
-    const allowedReviewStatuses = [
-      'Pendiente de revisión',
-      'Validado',
-      'Descartado',
-    ];
-
-    if (
-      typeof id !== 'string' ||
-      !id.trim() ||
-      typeof title !== 'string' ||
-      !title.trim() ||
-      title.trim().length > 255 ||
-      typeof decision !== 'string' ||
-      !decision.trim() ||
-      !allowedStatuses.includes(status) ||
-      !allowedReviewStatuses.includes(review_status)
-    ) {
-      throw new Error(
-        'Los datos de la decisión no son válidos.'
-      );
-    }
-
-    if (
-      (
-        context !== null &&
-        context !== undefined &&
-        typeof context !== 'string'
-      ) ||
-      (
-        job !== null &&
-        job !== undefined &&
-        typeof job !== 'string'
-      ) ||
-      (
-        decision_owner !== null &&
-        decision_owner !== undefined &&
-        typeof decision_owner !== 'string'
-      )
-    ) {
-      throw new Error(
-        'Los campos opcionales deben contener texto.'
-      );
-    }
-
-    if (
-      (job || '').trim().length > 50 ||
-      (decision_owner || '').trim().length > 255
-    ) {
-      throw new Error(
-        'Uno de los campos supera la longitud permitida.'
-      );
-    }
-
-    try {
-      const existing = await sql
-        .prepare(`
-          SELECT id
-          FROM adr_candidates
-          WHERE id = ?
-            AND archived_at IS NULL
-          LIMIT 1
-        `)
-        .bindParams(id)
-        .execute();
-
-      if (existing.rows.length === 0) {
-        throw new Error(
-          'La decisión no existe o está archivada.'
-        );
-      }
-
-      await sql
-        .prepare(`
-          UPDATE adr_candidates
-          SET
-            title = ?,
-            decision = ?,
-            context = ?,
-            job = ?,
-            decision_owner = ?,
-            status = ?,
-            review_status = ?,
-            updated_at = CURRENT_TIMESTAMP
-          WHERE id = ?
-            AND archived_at IS NULL
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `)
         .bindParams(
-          title.trim(),
-          decision.trim(),
-          context?.trim() || null,
-          job?.trim() || null,
-          decision_owner?.trim() || null,
-          status,
-          review_status,
-          id
+          candidate.id,
+          spaceId,
+          candidate.title,
+          candidate.decision,
+          candidate.context || null,
+          candidate.job || null,
+          candidate.status || 'Propuesto',
+          'Pendiente de revisión',
+          candidate.decision_owner || null,
+          candidate.source_file,
+          'markdown',
+          candidate.meeting_date || null,
+          candidate.source_hash,
+          JSON.stringify(candidate.evidence || [])
         )
         .execute();
 
-      return {
-        success: true,
-        id,
-        message:
-          'Decisión actualizada correctamente.',
-      };
-    } catch (error) {
-      console.error(
-        '[Minerva ADR] Error al editar decisión:',
-        error
-      );
-
-      throw new Error(
-        'No fue posible actualizar la decisión.'
-      );
+      inserted++;
     }
+
+    return {
+      success: true,
+      meeting_title: extraction.meeting_title,
+      meeting_date: extraction.meeting_date,
+      source_file: extraction.source_file,
+      total_candidates: extraction.candidates.length,
+      inserted,
+      duplicates,
+      warnings: extraction.warnings,
+    };
   },
 
-  // ==========================================================
+  // ----------------------------------------------------------
+  // ADR - VALIDAR / DESCARTAR
+  // ----------------------------------------------------------
+
+  updateReviewStatus: async ({
+    payload,
+    context,
+  }) => {
+    const spaceId = await authorizedSpace(context);
+
+    const id = assertId(payload?.id);
+    const reviewStatus = payload?.reviewStatus;
+
+    if (
+      !['Validado', 'Descartado'].includes(
+        reviewStatus
+      )
+    ) {
+      throw new Error(
+        'Estado de revisión no válido.'
+      );
+    }
+
+    await candidateExists(id, spaceId);
+
+    await sql
+      .prepare(`
+        UPDATE adr_candidates
+        SET
+          review_status = ?,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND space_id = ?
+      `)
+      .bindParams(
+        reviewStatus,
+        id,
+        spaceId
+      )
+      .execute();
+
+    return {
+      success: true,
+      id,
+      review_status: reviewStatus,
+    };
+  },
+
+  // ----------------------------------------------------------
+  // ADR - EDITAR
+  // ----------------------------------------------------------
+
+  updateCandidate: async ({
+    payload,
+    context,
+  }) => {
+    const spaceId = await authorizedSpace(context);
+
+    const id = assertId(payload?.id);
+
+    const title = requiredText(
+      payload?.title,
+      255
+    );
+
+    const decision = requiredText(
+      payload?.decision
+    );
+
+    const contextText = optionalText(
+      payload?.context
+    );
+
+    const job = optionalText(
+      payload?.job,
+      50
+    );
+
+    const owner = optionalText(
+      payload?.decision_owner,
+      255
+    );
+
+    const status = payload?.status;
+    const reviewStatus = payload?.review_status;
+
+    if (
+      !DECISION_STATUSES.includes(status) ||
+      !REVIEW_STATUSES.includes(reviewStatus)
+    ) {
+      throw new Error(
+        'Los estados de la decisión no son válidos.'
+      );
+    }
+
+    await candidateExists(
+      id,
+      spaceId,
+      'AND archived_at IS NULL'
+    );
+
+    await sql
+      .prepare(`
+        UPDATE adr_candidates
+        SET
+          title = ?,
+          decision = ?,
+          context = ?,
+          job = ?,
+          decision_owner = ?,
+          status = ?,
+          review_status = ?,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND space_id = ?
+          AND archived_at IS NULL
+      `)
+      .bindParams(
+        title,
+        decision,
+        contextText,
+        job,
+        owner,
+        status,
+        reviewStatus,
+        id,
+        spaceId
+      )
+      .execute();
+
+    return {
+      success: true,
+      id,
+      message:
+        'Decisión actualizada correctamente.',
+    };
+  },
+
+  // ----------------------------------------------------------
   // ADR - ARCHIVAR
-  // ==========================================================
+  // ----------------------------------------------------------
 
-  archiveCandidate: async ({ payload }) => {
-    const { id } = payload || {};
+  archiveCandidate: async ({
+    payload,
+    context,
+  }) => {
+    const spaceId = await authorizedSpace(context);
+    const id = assertId(payload?.id);
 
-    if (
-      typeof id !== 'string' ||
-      !id.trim()
-    ) {
-      throw new Error(
-        'Debes proporcionar un identificador válido.'
-      );
-    }
+    await candidateExists(
+      id,
+      spaceId,
+      'AND archived_at IS NULL'
+    );
 
-    try {
-      const existing = await sql
-        .prepare(`
-          SELECT id
-          FROM adr_candidates
-          WHERE id = ?
-            AND archived_at IS NULL
-          LIMIT 1
-        `)
-        .bindParams(id)
-        .execute();
+    await sql
+      .prepare(`
+        UPDATE adr_candidates
+        SET
+          archived_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND space_id = ?
+          AND archived_at IS NULL
+      `)
+      .bindParams(id, spaceId)
+      .execute();
 
-      if (existing.rows.length === 0) {
-        throw new Error(
-          'El candidato no existe o ya está archivado.'
-        );
-      }
-
-      await sql
-        .prepare(`
-          UPDATE adr_candidates
-          SET
-            archived_at = CURRENT_TIMESTAMP,
-            updated_at = CURRENT_TIMESTAMP
-          WHERE id = ?
-        `)
-        .bindParams(id)
-        .execute();
-
-      return {
-        success: true,
-        id,
-        message:
-          'Candidato archivado correctamente.',
-      };
-    } catch (error) {
-      console.error(
-        '[Minerva ADR] Error al archivar candidato:',
-        error
-      );
-
-      throw new Error(
-        'No fue posible archivar el candidato.'
-      );
-    }
+    return {
+      success: true,
+      id,
+      message: 'Candidato archivado correctamente.',
+    };
   },
 
-  // ==========================================================
+  // ----------------------------------------------------------
   // ADR - RESTAURAR
-  // ==========================================================
+  // ----------------------------------------------------------
 
-  restoreCandidate: async ({ payload }) => {
-    const { id } = payload || {};
+  restoreCandidate: async ({
+    payload,
+    context,
+  }) => {
+    const spaceId = await authorizedSpace(context);
+    const id = assertId(payload?.id);
 
-    if (
-      typeof id !== 'string' ||
-      !id.trim()
-    ) {
-      throw new Error(
-        'Debes proporcionar un identificador válido.'
-      );
-    }
+    await candidateExists(
+      id,
+      spaceId,
+      'AND archived_at IS NOT NULL'
+    );
 
-    try {
-      const existing = await sql
-        .prepare(`
-          SELECT id
-          FROM adr_candidates
-          WHERE id = ?
-            AND archived_at IS NOT NULL
-          LIMIT 1
-        `)
-        .bindParams(id)
-        .execute();
+    await sql
+      .prepare(`
+        UPDATE adr_candidates
+        SET
+          archived_at = NULL,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND space_id = ?
+          AND archived_at IS NOT NULL
+      `)
+      .bindParams(id, spaceId)
+      .execute();
 
-      if (existing.rows.length === 0) {
-        throw new Error(
-          'El candidato no existe o no está archivado.'
-        );
-      }
-
-      await sql
-        .prepare(`
-          UPDATE adr_candidates
-          SET
-            archived_at = NULL,
-            updated_at = CURRENT_TIMESTAMP
-          WHERE id = ?
-        `)
-        .bindParams(id)
-        .execute();
-
-      return {
-        success: true,
-        id,
-        message:
-          'Candidato restaurado correctamente.',
-      };
-    } catch (error) {
-      console.error(
-        '[Minerva ADR] Error al restaurar candidato:',
-        error
-      );
-
-      throw new Error(
-        'No fue posible restaurar el candidato.'
-      );
-    }
+    return {
+      success: true,
+      id,
+      message: 'Candidato restaurado correctamente.',
+    };
   },
 
-  // ==========================================================
+  // ----------------------------------------------------------
   // ADR - ELIMINAR DEFINITIVAMENTE
-  // ==========================================================
+  // ----------------------------------------------------------
 
-  deleteCandidate: async ({ payload }) => {
-    const { id } = payload || {};
+  deleteCandidate: async ({
+    payload,
+    context,
+  }) => {
+    const spaceId = await authorizedSpace(context);
+    const id = assertId(payload?.id);
 
-    if (
-      typeof id !== 'string' ||
-      !id.trim()
-    ) {
-      throw new Error(
-        'Debes proporcionar un identificador válido.'
-      );
-    }
+    await candidateExists(id, spaceId);
 
-    try {
-      const existing = await sql
-        .prepare(`
-          SELECT id
-          FROM adr_candidates
-          WHERE id = ?
-          LIMIT 1
-        `)
-        .bindParams(id)
-        .execute();
+    await sql
+      .prepare(`
+        DELETE FROM adr_candidates
+        WHERE id = ?
+          AND space_id = ?
+      `)
+      .bindParams(id, spaceId)
+      .execute();
 
-      if (existing.rows.length === 0) {
-        throw new Error(
-          'El candidato ADR no existe.'
-        );
-      }
-
-      await sql
-        .prepare(`
-          DELETE FROM adr_candidates
-          WHERE id = ?
-        `)
-        .bindParams(id)
-        .execute();
-
-      return {
-        success: true,
-        id,
-        message:
-          'Candidato eliminado definitivamente.',
-      };
-    } catch (error) {
-      console.error(
-        '[Minerva ADR] Error al eliminar candidato:',
-        error
-      );
-
-      throw new Error(
-        'No fue posible eliminar el candidato.'
-      );
-    }
+    return {
+      success: true,
+      id,
+      message:
+        'Candidato eliminado definitivamente.',
+    };
   },
-
 });

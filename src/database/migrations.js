@@ -1,6 +1,10 @@
 
 import { migrationRunner } from '@forge/sql';
 
+// ============================================================
+// V001 - TABLA PRINCIPAL DE CANDIDATOS ADR
+// ============================================================
+
 const CREATE_ADR_CANDIDATES = `
   CREATE TABLE IF NOT EXISTS adr_candidates (
     id VARCHAR(36) PRIMARY KEY,
@@ -19,6 +23,10 @@ const CREATE_ADR_CANDIDATES = `
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )
 `;
+
+// ============================================================
+// V002 - V006
+// ============================================================
 
 const ADD_ARCHIVED_AT = `
   ALTER TABLE adr_candidates
@@ -45,6 +53,10 @@ const MAKE_SOURCE_HASH_NULLABLE = `
   MODIFY COLUMN source_hash VARCHAR(64) NULL
 `;
 
+// ============================================================
+// V007 - HISTORIAL DE SINCRONIZACIÓN
+// ============================================================
+
 const CREATE_DRIVE_SYNC_FILES = `
   CREATE TABLE IF NOT EXISTS drive_sync_files (
     file_id VARCHAR(255) PRIMARY KEY,
@@ -61,7 +73,7 @@ const CREATE_DRIVE_SYNC_FILES = `
 `;
 
 // ============================================================
-// V008 - CONFIGURACIÓN DE GOOGLE DRIVE POR USUARIO
+// V008 - CONFIGURACIÓN LEGACY POR USUARIO
 // ============================================================
 
 const CREATE_DRIVE_USER_CONFIG = `
@@ -75,7 +87,7 @@ const CREATE_DRIVE_USER_CONFIG = `
 `;
 
 // ============================================================
-// REGISTRO DE MIGRACIONES
+// V009 - IDENTIFICADOR ÚNICO DE ARCHIVO GOOGLE DRIVE
 // ============================================================
 
 const ADD_SOURCE_FILE_ID = `
@@ -83,34 +95,137 @@ const ADD_SOURCE_FILE_ID = `
   ADD COLUMN source_file_id VARCHAR(255) NULL
 `;
 
+// ============================================================
+// V010 - AISLAMIENTO DE ADR POR ESPACIO
+// ============================================================
+
+const ADD_ADR_SPACE_ID = `
+  ALTER TABLE adr_candidates
+  ADD COLUMN space_id VARCHAR(255) NULL
+`;
+
+// ============================================================
+// V011 - CONFIGURACIÓN DE DRIVE POR ESPACIO
+// ============================================================
+
+// Cada espacio tiene una carpeta configurada.
+// configured_by_account_id identifica al usuario que
+// autorizó inicialmente esa configuración.
+//
+// La tabla legacy drive_user_config se conserva para
+// evitar perder las configuraciones existentes.
+
+const CREATE_DRIVE_SPACE_CONFIG = `
+  CREATE TABLE IF NOT EXISTS drive_space_config (
+    space_id VARCHAR(255) PRIMARY KEY,
+    folder_id VARCHAR(255) NOT NULL,
+    folder_name VARCHAR(500) NOT NULL,
+    configured_by_account_id VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`;
+
+// ============================================================
+// V012 - AISLAMIENTO DEL HISTORIAL POR ESPACIO
+// ============================================================
+
+// Conservamos la clave primaria file_id actual.
+// El sincronizador generará una clave de seguimiento
+// mediante el espacio, usuario y archivo de Google.
+//
+// Las filas anteriores permanecerán sin espacio hasta
+// que se decida si deben migrarse o mantenerse como legacy.
+
+const ADD_SYNC_SPACE_ID = `
+  ALTER TABLE drive_sync_files
+  ADD COLUMN space_id VARCHAR(255) NULL
+`;
+
+// ============================================================
+// REGISTRO DE MIGRACIONES
+// ============================================================
+
 const migrations = migrationRunner
-  .enqueue('v001_create_adr_candidates', CREATE_ADR_CANDIDATES)
-  .enqueue('v002_add_archived_at', ADD_ARCHIVED_AT)
-  .enqueue('v003_add_source_type', ADD_SOURCE_TYPE)
-  .enqueue('v004_add_source_reference', ADD_SOURCE_REFERENCE)
-  .enqueue('v005_make_source_file_nullable', MAKE_SOURCE_FILE_NULLABLE)
-  .enqueue('v006_make_source_hash_nullable', MAKE_SOURCE_HASH_NULLABLE)
-  .enqueue('v007_create_drive_sync_files', CREATE_DRIVE_SYNC_FILES)
-  .enqueue('v008_create_drive_user_config', CREATE_DRIVE_USER_CONFIG)
-  .enqueue('v009_add_source_file_id', ADD_SOURCE_FILE_ID);
+  .enqueue(
+    'v001_create_adr_candidates',
+    CREATE_ADR_CANDIDATES
+  )
+  .enqueue(
+    'v002_add_archived_at',
+    ADD_ARCHIVED_AT
+  )
+  .enqueue(
+    'v003_add_source_type',
+    ADD_SOURCE_TYPE
+  )
+  .enqueue(
+    'v004_add_source_reference',
+    ADD_SOURCE_REFERENCE
+  )
+  .enqueue(
+    'v005_make_source_file_nullable',
+    MAKE_SOURCE_FILE_NULLABLE
+  )
+  .enqueue(
+    'v006_make_source_hash_nullable',
+    MAKE_SOURCE_HASH_NULLABLE
+  )
+  .enqueue(
+    'v007_create_drive_sync_files',
+    CREATE_DRIVE_SYNC_FILES
+  )
+  .enqueue(
+    'v008_create_drive_user_config',
+    CREATE_DRIVE_USER_CONFIG
+  )
+  .enqueue(
+    'v009_add_source_file_id',
+    ADD_SOURCE_FILE_ID
+  )
+  .enqueue(
+    'v010_add_adr_space_id',
+    ADD_ADR_SPACE_ID
+  )
+  .enqueue(
+    'v011_create_drive_space_config',
+    CREATE_DRIVE_SPACE_CONFIG
+  )
+  .enqueue(
+    'v012_add_sync_space_id',
+    ADD_SYNC_SPACE_ID
+  );
 
 // ============================================================
 // EJECUCIÓN DE MIGRACIONES
 // ============================================================
 
 export const runMigration = async () => {
-  console.log('[Minerva ADR] Iniciando migraciones SQL');
+  console.log(
+    '[Minerva ADR] Iniciando migraciones SQL'
+  );
 
   try {
     const results = await migrations.run();
 
-    console.log('[Minerva ADR] Resultado:', results);
+    console.log(
+      '[Minerva ADR] Resultado:',
+      results
+    );
 
     const applied = await migrationRunner.list();
 
-    console.log('[Minerva ADR] Estado de migraciones:', applied);
+    console.log(
+      '[Minerva ADR] Estado de migraciones:',
+      applied
+    );
   } catch (error) {
-    console.error('[Minerva ADR] Error de migración:', error);
+    console.error(
+      '[Minerva ADR] Error de migración:',
+      error
+    );
+
     throw error;
   }
 };
+

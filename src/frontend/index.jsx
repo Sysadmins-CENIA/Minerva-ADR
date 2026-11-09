@@ -6,6 +6,7 @@ import React, {
 } from 'react';
 
 import ForgeReconciler, {
+  useProductContext,
   Box,
   Button,
   FilePicker,
@@ -113,6 +114,11 @@ const Field = ({
 );
 
 const App = () => {
+
+  const productContext = useProductContext();
+
+  const spaceName =
+    productContext?.extension?.space?.key || null;
 
   // ==========================================================
   // NAVEGACIÓN
@@ -2067,6 +2073,12 @@ const App = () => {
             extraídas desde minutas de reuniones.
           </Text>
         </Stack>
+
+        {spaceName && (
+          <Lozenge appearance="inprogress">
+            Espacio: {spaceName}
+          </Lozenge>
+        )}
 
         {/* NAVEGACIÓN */}
 

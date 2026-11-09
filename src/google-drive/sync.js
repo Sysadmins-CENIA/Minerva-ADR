@@ -47,43 +47,69 @@ function getAccountId(context) {
   return accountId;
 }
 
-// Identificador de seguimiento por usuario y archivo.
-function getTrackingId(accountId, fileId) {
-  return sha256(`${accountId}\0${fileId}`);
+function getSpaceId(options) {
+  const spaceId = options?.spaceId;
+
+  if (
+    (typeof spaceId !== 'string' &&
+      typeof spaceId !== 'number') ||
+    !/^[0-9]+$/.test(String(spaceId))
+  ) {
+    throw new Error(
+      'No se recibió un espacio de Confluence válido.'
+    );
+  }
+
+  return String(spaceId);
 }
 
-// Identificador estable de un candidato dentro
-// de su archivo de Google Drive.
-function getCandidateHash(fileId, candidateHash) {
+// Identificador de seguimiento específico
+// para espacio, usuario y archivo.
+function getTrackingId(spaceId, accountId, fileId) {
+  return sha256(
+    `${spaceId}\0${accountId}\0${fileId}`
+  );
+}
+
+// Hash del candidato específico para su espacio
+// y archivo de Google Drive.
+function getCandidateHash(
+  spaceId,
+  fileId,
+  candidateHash
+) {
   if (!candidateHash) {
     throw new Error(
       'El candidato no contiene un hash válido.'
     );
   }
 
-  return sha256(`${fileId}\0${candidateHash}`);
+  return sha256(
+    `${spaceId}\0${fileId}\0${candidateHash}`
+  );
 }
 
 // ============================================================
-// CONFIGURACIÓN DE GOOGLE DRIVE
+// CONFIGURACIÓN DRIVE POR ESPACIO
 // ============================================================
 
-async function getSavedFolder(accountId) {
+async function getSavedFolder(spaceId) {
   const result = await sql
     .prepare(`
       SELECT
         folder_id,
-        folder_name
-      FROM drive_user_config
-      WHERE account_id = ?
+        folder_name,
+        configured_by_account_id
+      FROM drive_space_config
+      WHERE space_id = ?
       LIMIT 1
     `)
-    .bindParams(accountId)
+    .bindParams(spaceId)
     .execute();
 
   if (result.rows.length === 0) {
     throw new Error(
-      'Primero debes configurar una carpeta de Google Drive.'
+      'Primero debes configurar una carpeta de Google Drive para este espacio.'
     );
   }
 
@@ -94,7 +120,7 @@ async function getSavedFolder(accountId) {
 // HISTORIAL DE SINCRONIZACIÓN
 // ============================================================
 
-async function getFileState(trackingId) {
+async function getFileState(trackingId, spaceId) {
   const result = await sql
     .prepare(`
       SELECT
@@ -104,25 +130,39 @@ async function getFileState(trackingId) {
         status
       FROM drive_sync_files
       WHERE file_id = ?
+        AND space_id = ?
       LIMIT 1
     `)
-    .bindParams(trackingId)
+    .bindParams(trackingId, spaceId)
     .execute();
 
   return result.rows[0] || null;
 }
 
 function isUnchanged(previous, file) {
-  if (!previous || previous.status !== 'processed') {
+  if (
+    !previous ||
+    previous.status !== 'processed'
+  ) {
     return false;
   }
 
-  if (previous.md5_checksum && file.md5Checksum) {
-    return previous.md5_checksum === file.md5Checksum;
+  if (
+    previous.md5_checksum &&
+    file.md5Checksum
+  ) {
+    return (
+      previous.md5_checksum === file.md5Checksum
+    );
   }
 
-  if (previous.modified_time && file.modifiedTime) {
-    return previous.modified_time === file.modifiedTime;
+  if (
+    previous.modified_time &&
+    file.modifiedTime
+  ) {
+    return (
+      previous.modified_time === file.modifiedTime
+    );
   }
 
   return false;
@@ -130,6 +170,7 @@ function isUnchanged(previous, file) {
 
 async function saveFileState({
   trackingId,
+  spaceId,
   file,
   contentHash,
   status,
@@ -139,6 +180,7 @@ async function saveFileState({
     .prepare(`
       INSERT INTO drive_sync_files (
         file_id,
+        space_id,
         file_name,
         modified_time,
         md5_checksum,
@@ -147,8 +189,12 @@ async function saveFileState({
         last_error,
         processed_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?,
+        CURRENT_TIMESTAMP
+      )
       ON DUPLICATE KEY UPDATE
+        space_id = VALUES(space_id),
         file_name = VALUES(file_name),
         modified_time = VALUES(modified_time),
         md5_checksum = VALUES(md5_checksum),
@@ -160,29 +206,36 @@ async function saveFileState({
     `)
     .bindParams(
       trackingId,
+      spaceId,
       file.name,
       file.modifiedTime || null,
       file.md5Checksum || null,
       contentHash,
       status,
-      error ? String(error).slice(0, 2000) : null
+      error
+        ? String(error).slice(0, 2000)
+        : null
     )
     .execute();
 }
 
 // ============================================================
-// CONSULTAR DUPLICADOS
+// DUPLICADOS POR ESPACIO
 // ============================================================
 
-async function candidateExists(sourceHash) {
+async function candidateExists(
+  sourceHash,
+  spaceId
+) {
   const result = await sql
     .prepare(`
       SELECT id
       FROM adr_candidates
       WHERE source_hash = ?
+        AND space_id = ?
       LIMIT 1
     `)
-    .bindParams(sourceHash)
+    .bindParams(sourceHash, spaceId)
     .execute();
 
   return result.rows.length > 0;
@@ -194,6 +247,7 @@ async function candidateExists(sourceHash) {
 
 async function insertCandidate({
   candidate,
+  spaceId,
   fileId,
   sourcePath,
 }) {
@@ -209,11 +263,17 @@ async function insertCandidate({
   }
 
   const sourceHash = getCandidateHash(
+    spaceId,
     fileId,
     candidate.source_hash
   );
 
-  if (await candidateExists(sourceHash)) {
+  if (
+    await candidateExists(
+      sourceHash,
+      spaceId
+    )
+  ) {
     return false;
   }
 
@@ -221,6 +281,7 @@ async function insertCandidate({
     .prepare(`
       INSERT INTO adr_candidates (
         id,
+        space_id,
         title,
         decision,
         context,
@@ -236,10 +297,14 @@ async function insertCandidate({
         source_hash,
         evidence
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?, ?
+      )
     `)
     .bindParams(
       randomUUID(),
+      spaceId,
       candidate.title.trim(),
       candidate.decision.trim(),
       candidate.context || null,
@@ -247,7 +312,7 @@ async function insertCandidate({
       candidate.status || 'Propuesto',
       'Pendiente de revisión',
       candidate.decision_owner || null,
-      candidate.source_file,
+      candidate.source_file || null,
       fileId,
       'markdown',
       sourcePath.slice(0, 500),
@@ -261,20 +326,23 @@ async function insertCandidate({
 }
 
 // ============================================================
-// ACTUALIZAR RUTAS DE ORIGEN
+// ACTUALIZAR RUTAS POR ESPACIO
 // ============================================================
 
-// Si una minuta se mueve a otra carpeta de Drive,
-// actualizamos la ruta de sus ADR existentes.
-// Se utiliza el ID del archivo, no su nombre.
-async function updateSourcePath(fileId, sourcePath) {
-  const normalizedPath = sourcePath.slice(0, 500);
+async function updateSourcePath(
+  spaceId,
+  fileId,
+  sourcePath
+) {
+  const normalizedPath =
+    sourcePath.slice(0, 500);
 
   await sql
     .prepare(`
       UPDATE adr_candidates
       SET source_reference = ?
-      WHERE source_file_id = ?
+      WHERE space_id = ?
+        AND source_file_id = ?
         AND source_type = 'markdown'
         AND (
           source_reference IS NULL
@@ -283,6 +351,7 @@ async function updateSourcePath(fileId, sourcePath) {
     `)
     .bindParams(
       normalizedPath,
+      spaceId,
       fileId,
       normalizedPath
     )
@@ -290,16 +359,18 @@ async function updateSourcePath(fileId, sourcePath) {
 }
 
 // ============================================================
-// PROCESAR ARCHIVO MARKDOWN
+// PROCESAR MARKDOWN
 // ============================================================
 
 async function processDriveFile({
   google,
   file,
   accountId,
+  spaceId,
   sourcePath,
 }) {
   const trackingId = getTrackingId(
+    spaceId,
     accountId,
     file.id
   );
@@ -307,7 +378,6 @@ async function processDriveFile({
   let contentHash = null;
 
   try {
-    // Descargar el Markdown.
     const content = await downloadDriveMarkdown(
       google,
       file
@@ -315,21 +385,21 @@ async function processDriveFile({
 
     contentHash = sha256(content);
 
-    // Ejecutar el extractor de decisiones.
     const extraction = extractCandidates(
       content,
       file.name
     );
 
-    const candidates = extraction.candidates || [];
+    const candidates =
+      extraction.candidates || [];
 
     let inserted = 0;
     let duplicates = 0;
 
-    // Insertar solamente candidatos nuevos.
     for (const candidate of candidates) {
       const wasInserted = await insertCandidate({
         candidate,
+        spaceId,
         fileId: file.id,
         sourcePath,
       });
@@ -341,15 +411,15 @@ async function processDriveFile({
       }
     }
 
-    // Actualizar la ubicación de los ADR existentes.
     await updateSourcePath(
+      spaceId,
       file.id,
       sourcePath
     );
 
-    // Registrar el procesamiento exitoso.
     await saveFileState({
       trackingId,
+      spaceId,
       file,
       contentHash,
       status: 'processed',
@@ -364,17 +434,22 @@ async function processDriveFile({
   } catch (error) {
     console.error(
       '[Minerva ADR] Error procesando archivo:',
-      file.name,
-      error
+      {
+        spaceId,
+        fileName: file.name,
+        message: error?.message,
+      }
     );
 
     try {
       await saveFileState({
         trackingId,
+        spaceId,
         file,
         contentHash,
         status: 'error',
-        error: error?.message || 'Error desconocido',
+        error:
+          error?.message || 'Error desconocido',
       });
     } catch (stateError) {
       console.error(
@@ -385,13 +460,14 @@ async function processDriveFile({
 
     return {
       success: false,
-      message: error?.message || 'Error desconocido',
+      message:
+        error?.message || 'Error desconocido',
     };
   }
 }
 
 // ============================================================
-// SINCRONIZACIÓN PRINCIPAL
+// SINCRONIZACIÓN PRINCIPAL POR ESPACIO
 // ============================================================
 
 export async function syncDriveMarkdown(
@@ -399,17 +475,19 @@ export async function syncDriveMarkdown(
   options = {}
 ) {
   const accountId = getAccountId(context);
+  const spaceId = getSpaceId(options);
 
   const forceReprocess =
     options.reprocess === true;
 
   const savedFolder = await getSavedFolder(
-    accountId
+    spaceId
   );
 
+  // Google OAuth sigue asociado al usuario
+  // que ejecuta la sincronización manual.
   const google = await getAuthorizedDriveClient();
 
-  // Verificar acceso a la carpeta configurada.
   const root = await getDriveFolder(
     google,
     savedFolder.folder_id
@@ -418,6 +496,7 @@ export async function syncDriveMarkdown(
   console.log(
     '[Minerva ADR] Iniciando sincronización',
     {
+      spaceId,
       folder: root.name,
       forceReprocess,
     }
@@ -425,6 +504,7 @@ export async function syncDriveMarkdown(
 
   const summary = {
     success: true,
+    spaceId,
     folder: root.name,
     reprocessed: forceReprocess,
     foldersScanned: 0,
@@ -438,8 +518,6 @@ export async function syncDriveMarkdown(
     truncated: false,
   };
 
-  // Recorrido recursivo en anchura.
-  // Se conserva la ruta de cada carpeta.
   const queue = [
     {
       id: root.id,
@@ -448,7 +526,6 @@ export async function syncDriveMarkdown(
   ];
 
   const visited = new Set();
-
   let attemptedFiles = 0;
 
   while (
@@ -465,7 +542,6 @@ export async function syncDriveMarkdown(
     visited.add(current.id);
     summary.foldersScanned++;
 
-    // Consultar subcarpetas y archivos.
     const result = await listDriveChildren(
       google,
       current.id
@@ -484,17 +560,16 @@ export async function syncDriveMarkdown(
       isMarkdownFile
     );
 
-    // Agregar subcarpetas a la cola.
     for (const folder of folders) {
       if (!visited.has(folder.id)) {
         queue.push({
           id: folder.id,
-          path: `${current.path}/${folder.name}`,
+          path:
+            `${current.path}/${folder.name}`,
         });
       }
     }
 
-    // Procesar archivos Markdown.
     for (
       let index = 0;
       index < markdownFiles.length;
@@ -508,23 +583,22 @@ export async function syncDriveMarkdown(
       summary.filesFound++;
 
       const trackingId = getTrackingId(
+        spaceId,
         accountId,
         file.id
       );
 
       const previous = await getFileState(
-        trackingId
+        trackingId,
+        spaceId
       );
 
-      // Sincronización normal:
-      // omitir archivos sin cambios.
       if (
         !forceReprocess &&
         isUnchanged(previous, file)
       ) {
-        // La ruta puede haber cambiado
-        // aunque el contenido no cambie.
         await updateSourcePath(
+          spaceId,
           file.id,
           sourcePath
         );
@@ -533,15 +607,15 @@ export async function syncDriveMarkdown(
         continue;
       }
 
-      // Limitar archivos procesados por ejecución.
-      if (attemptedFiles >= MAX_FILES_PER_RUN) {
+      if (
+        attemptedFiles >= MAX_FILES_PER_RUN
+      ) {
         summary.truncated = true;
         break;
       }
 
       attemptedFiles++;
 
-      // Validar tamaño del Markdown.
       if (
         file.size != null &&
         Number(file.size) > MAX_MARKDOWN_SIZE
@@ -562,6 +636,7 @@ export async function syncDriveMarkdown(
         try {
           await saveFileState({
             trackingId,
+            spaceId,
             file,
             contentHash: null,
             status: 'error',
@@ -577,11 +652,11 @@ export async function syncDriveMarkdown(
         continue;
       }
 
-      // Extraer y registrar candidatos.
       const resultFile = await processDriveFile({
         google,
         file,
         accountId,
+        spaceId,
         sourcePath,
       });
 
@@ -626,6 +701,7 @@ export async function syncDriveMarkdown(
   console.log(
     '[Minerva ADR] Sincronización finalizada',
     JSON.stringify({
+      spaceId,
       folders: summary.foldersScanned,
       processed: summary.filesProcessed,
       unchanged: summary.filesUnchanged,
