@@ -156,7 +156,6 @@ Las migraciones SQL se ejecutan mediante un disparador programado de Forge.
 
 - Automatizar la sincronización periódica de Google Drive.
 - Resolver la autenticación OAuth para ejecuciones sin sesión interactiva.
-- Completar las pruebas de seguridad y permisos institucionales.
 - Definir una política para migrar los registros históricos sin `space_id`.
 - Completar la configuración y verificación de Google OAuth para uso institucional.
 - Validar la instalación en el Confluence institucional de CENIA.
