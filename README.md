@@ -19,7 +19,6 @@ El sistema permite identificar candidatos ADR, revisarlos y mantener un registro
 ### Integración con Google Drive
 
 - Autenticación mediante Google OAuth 2.0.
-- Acceso de solo lectura (`drive.readonly`).
 - Búsqueda y selección de carpetas.
 - Exploración recursiva de subcarpetas.
 - Sincronización manual de minutas Markdown.
@@ -167,9 +166,3 @@ Las migraciones SQL se ejecutan mediante un disparador programado de Forge.
 **Prototipo funcional desplegado en entorno de desarrollo.**
 
 Funcionan la gestión de candidatos ADR, la importación de Markdown, la sincronización manual de Google Drive y la separación lógica de datos por espacio de Confluence.
-
-La sincronización automática queda fuera del alcance de esta versión.
-
-## Licencia
-
-Por definir.
