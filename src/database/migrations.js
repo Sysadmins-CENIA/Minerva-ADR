@@ -143,6 +143,18 @@ const ADD_SYNC_SPACE_ID = `
 `;
 
 // ============================================================
+// V013 - ESTADO DEL RECORRIDO POR ETAPAS DE LA CARPETA
+// ============================================================
+
+// Ids de las carpetas de reunión ya revisadas en el ciclo actual,
+// para que una sincronización retome donde quedó la anterior.
+
+const ADD_SCAN_STATE = `
+  ALTER TABLE drive_space_config
+  ADD COLUMN scan_state JSON NULL
+`;
+
+// ============================================================
 // REGISTRO DE MIGRACIONES
 // ============================================================
 
@@ -194,6 +206,10 @@ const migrations = migrationRunner
   .enqueue(
     'v012_add_sync_space_id',
     ADD_SYNC_SPACE_ID
+  )
+  .enqueue(
+    'v013_add_scan_state',
+    ADD_SCAN_STATE
   );
 
 // ============================================================

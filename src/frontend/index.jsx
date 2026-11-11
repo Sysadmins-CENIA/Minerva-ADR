@@ -561,11 +561,15 @@ const App = () => {
     try {
       const result = await call('syncDriveMarkdown', { reprocess }, 'No fue posible completar la sincronización.');
       await loadDecisions();
-      if (result.errors?.length || result.truncated) setSyncReport(result);
+      if (result.errors?.length) setSyncReport(result);
+      // Un recorrido por etapas no es un error: la próxima sincronización retoma donde quedó.
+      const pending = result.truncated
+        ? ` · ${result.pendingFolders ? plural(result.pendingFolders, 'carpeta pendiente', 'carpetas pendientes') : 'revisión parcial'}; la próxima sincronización continúa`
+        : '';
       notify(
         result.errors?.length ? 'warning' : 'success',
         'Sincronización terminada',
-        `${plural(result.inserted || 0, 'decisión nueva', 'decisiones nuevas')} · ${plural(result.filesProcessed || 0, 'minuta leída', 'minutas leídas')}`
+        `${plural(result.inserted || 0, 'decisión nueva', 'decisiones nuevas')} · ${plural(result.filesProcessed || 0, 'minuta leída', 'minutas leídas')}${pending}`
       );
     } catch (err) {
       fail(err);
@@ -687,7 +691,7 @@ const App = () => {
   const toolbar = (
     <Inline space="space.100" alignBlock="center" spread="space-between" shouldWrap>
       <Inline space="space.100" shouldWrap>
-        <LoadingButton appearance="primary" iconBefore="refresh" isLoading={syncing} onClick={() => syncDrive(false)}>
+        <LoadingButton appearance="primary" iconBefore="refresh" isLoading={syncing} isDisabled={googleLoading} onClick={() => syncDrive(false)}>
           {savedFolder || googleLoading ? 'Sincronizar Drive' : 'Conectar Drive'}
         </LoadingButton>
         <Button iconBefore="upload" onClick={() => { setImportResult(null); setShowImport(true); }}>
@@ -766,7 +770,7 @@ const App = () => {
       header="Aún no hay decisiones en este espacio"
       description="Sincroniza la carpeta de minutas en Google Drive o importa un archivo Markdown para extraer decisiones."
       primaryAction={
-        <Button appearance="primary" onClick={() => syncDrive(false)}>
+        <Button appearance="primary" isDisabled={googleLoading} onClick={() => syncDrive(false)}>
           {savedFolder || googleLoading ? 'Sincronizar Drive' : 'Conectar Drive'}
         </Button>
       }
@@ -1116,7 +1120,6 @@ const App = () => {
       {syncReport && (
         <SectionMessage appearance="warning" title="La sincronización terminó con observaciones">
           <Stack space="space.100">
-            {syncReport.truncated && <Text>Se alcanzó el límite de exploración; sincroniza de nuevo para continuar.</Text>}
             {(syncReport.errors || []).map((e, i) => (
               <Text key={`${e.file}-${i}`} size="small">{`${e.file}: ${e.message}`}</Text>
             ))}

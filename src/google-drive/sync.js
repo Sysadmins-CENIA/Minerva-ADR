@@ -4,6 +4,11 @@ import { createHash, randomUUID } from 'node:crypto';
 
 import { extractCandidates } from '../parser/extractor.js';
 import { dateFromPath } from '../shared/dates.js';
+import {
+  parseScanState,
+  scanTree,
+  serializeScanState,
+} from './scan-plan.js';
 
 import {
   GOOGLE_FOLDER_MIME,
@@ -20,7 +25,9 @@ import {
 // ============================================================
 
 const MAX_FILES_PER_RUN = 5;
-const MAX_FOLDERS_PER_RUN = 100;
+// Las funciones invocadas desde la UI tienen ~25 s; se deja margen para
+// guardar el estado del recorrido y responder.
+const SYNC_TIME_BUDGET_MS = 18000;
 const MAX_ERRORS_RETURNED = 20;
 
 // ============================================================
@@ -100,7 +107,8 @@ async function getSavedFolder(spaceId) {
       SELECT
         folder_id,
         folder_name,
-        configured_by_account_id
+        configured_by_account_id,
+        scan_state
       FROM drive_space_config
       WHERE space_id = ?
       LIMIT 1
@@ -115,6 +123,17 @@ async function getSavedFolder(spaceId) {
   }
 
   return result.rows[0];
+}
+
+async function saveScanState(spaceId, visited) {
+  await sql
+    .prepare(`
+      UPDATE drive_space_config
+      SET scan_state = ?
+      WHERE space_id = ?
+    `)
+    .bindParams(serializeScanState(visited), spaceId)
+    .execute();
 }
 
 // ============================================================
@@ -526,185 +545,160 @@ export async function syncDriveMarkdown(
     truncated: false,
   };
 
-  const queue = [
-    {
-      id: root.id,
-      path: root.name,
-    },
-  ];
-
-  const visited = new Set();
+  // Recorrido por etapas: retoma donde quedó la sincronización anterior y
+  // revisa primero las reuniones más nuevas (ver scan-plan.js).
+  const deadline = Date.now() + SYNC_TIME_BUDGET_MS;
   let attemptedFiles = 0;
 
-  while (
-    queue.length > 0 &&
-    visited.size < MAX_FOLDERS_PER_RUN &&
-    attemptedFiles < MAX_FILES_PER_RUN
-  ) {
-    const current = queue.shift();
-
-    if (visited.has(current.id)) {
-      continue;
-    }
-
-    visited.add(current.id);
-    summary.foldersScanned++;
-
-    const result = await listDriveChildren(
-      google,
-      current.id
-    );
-
-    if (result.truncated) {
-      summary.truncated = true;
-    }
-
-    const folders = result.files.filter(
-      (file) =>
-        file.mimeType === GOOGLE_FOLDER_MIME
-    );
-
-    const markdownFiles = result.files.filter(
-      isMarkdownFile
-    );
-
-    for (const folder of folders) {
-      if (!visited.has(folder.id)) {
-        queue.push({
-          id: folder.id,
-          path:
-            `${current.path}/${folder.name}`,
-        });
-      }
-    }
-
-    for (
-      let index = 0;
-      index < markdownFiles.length;
-      index++
-    ) {
-      const file = markdownFiles[index];
-
-      const sourcePath =
-        `${current.path}/${file.name}`;
-
-      summary.filesFound++;
-
-      const trackingId = getTrackingId(
-        spaceId,
-        accountId,
-        file.id
+  const scan = await scanTree({
+    root: { id: root.id, name: root.name, path: root.name },
+    visited: parseScanState(savedFolder.scan_state),
+    shouldStop: () =>
+      Date.now() > deadline ||
+      attemptedFiles >= MAX_FILES_PER_RUN,
+    listChildren: async (folder) => {
+      const result = await listDriveChildren(
+        google,
+        folder.id
       );
 
-      const previous = await getFileState(
-        trackingId,
-        spaceId
-      );
-
-      if (
-        !forceReprocess &&
-        isUnchanged(previous, file)
+      return {
+        folders: result.files.filter(
+          (file) =>
+            file.mimeType === GOOGLE_FOLDER_MIME
+        ),
+        files: result.files.filter(isMarkdownFile),
+        truncated: result.truncated,
+      };
+    },
+    handleFolder: async (current, markdownFiles) => {
+      for (
+        let index = 0;
+        index < markdownFiles.length;
+        index++
       ) {
-        await updateSourcePath(
+        const file = markdownFiles[index];
+
+        const sourcePath =
+          `${current.path}/${file.name}`;
+
+        summary.filesFound++;
+
+        const trackingId = getTrackingId(
           spaceId,
-          file.id,
-          sourcePath
+          accountId,
+          file.id
         );
 
-        summary.filesUnchanged++;
-        continue;
-      }
-
-      if (
-        attemptedFiles >= MAX_FILES_PER_RUN
-      ) {
-        summary.truncated = true;
-        break;
-      }
-
-      attemptedFiles++;
-
-      if (
-        file.size != null &&
-        Number(file.size) > MAX_MARKDOWN_SIZE
-      ) {
-        const message =
-          'El archivo supera el límite de tamaño permitido.';
+        const previous = await getFileState(
+          trackingId,
+          spaceId
+        );
 
         if (
+          !forceReprocess &&
+          isUnchanged(previous, file)
+        ) {
+          await updateSourcePath(
+            spaceId,
+            file.id,
+            sourcePath
+          );
+
+          summary.filesUnchanged++;
+          continue;
+        }
+
+        if (
+          attemptedFiles >= MAX_FILES_PER_RUN
+        ) {
+          return true;
+        }
+
+        attemptedFiles++;
+
+        if (
+          file.size != null &&
+          Number(file.size) > MAX_MARKDOWN_SIZE
+        ) {
+          const message =
+            'El archivo supera el límite de tamaño permitido.';
+
+          if (
+            summary.errors.length <
+            MAX_ERRORS_RETURNED
+          ) {
+            summary.errors.push({
+              file: file.name,
+              message,
+            });
+          }
+
+          try {
+            await saveFileState({
+              trackingId,
+              spaceId,
+              file,
+              contentHash: null,
+              status: 'error',
+              error: message,
+            });
+          } catch (error) {
+            console.error(
+              '[Minerva ADR] Error registrando archivo:',
+              error
+            );
+          }
+
+          continue;
+        }
+
+        const resultFile = await processDriveFile({
+          google,
+          file,
+          accountId,
+          spaceId,
+          sourcePath,
+        });
+
+        if (resultFile.success) {
+          summary.filesProcessed++;
+
+          summary.candidatesFound +=
+            resultFile.candidatesFound;
+
+          summary.inserted +=
+            resultFile.inserted;
+
+          summary.duplicates +=
+            resultFile.duplicates;
+        } else if (
           summary.errors.length <
           MAX_ERRORS_RETURNED
         ) {
           summary.errors.push({
             file: file.name,
-            message,
+            message: resultFile.message,
           });
         }
 
-        try {
-          await saveFileState({
-            trackingId,
-            spaceId,
-            file,
-            contentHash: null,
-            status: 'error',
-            error: message,
-          });
-        } catch (error) {
-          console.error(
-            '[Minerva ADR] Error registrando archivo:',
-            error
-          );
+        if (
+          attemptedFiles >= MAX_FILES_PER_RUN &&
+          index < markdownFiles.length - 1
+        ) {
+          return true;
         }
-
-        continue;
       }
 
-      const resultFile = await processDriveFile({
-        google,
-        file,
-        accountId,
-        spaceId,
-        sourcePath,
-      });
+      return false;
+    },
+  });
 
-      if (resultFile.success) {
-        summary.filesProcessed++;
+  summary.foldersScanned = scan.foldersScanned;
+  summary.pendingFolders = scan.pending;
+  summary.truncated = !scan.complete;
 
-        summary.candidatesFound +=
-          resultFile.candidatesFound;
-
-        summary.inserted +=
-          resultFile.inserted;
-
-        summary.duplicates +=
-          resultFile.duplicates;
-      } else if (
-        summary.errors.length <
-        MAX_ERRORS_RETURNED
-      ) {
-        summary.errors.push({
-          file: file.name,
-          message: resultFile.message,
-        });
-      }
-
-      if (
-        attemptedFiles >= MAX_FILES_PER_RUN &&
-        index < markdownFiles.length - 1
-      ) {
-        summary.truncated = true;
-        break;
-      }
-    }
-  }
-
-  if (
-    queue.length > 0 ||
-    visited.size >= MAX_FOLDERS_PER_RUN
-  ) {
-    summary.truncated = true;
-  }
+  await saveScanState(spaceId, scan.visited);
 
   console.log(
     '[Minerva ADR] Sincronización finalizada',
