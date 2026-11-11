@@ -8,6 +8,8 @@ import {
   toggleAll,
   EXPORT_COLUMNS,
   exportRows,
+  decisionDate,
+  sortByDateDesc,
 } from '../src/frontend/decisions.js';
 
 const active = [
@@ -62,4 +64,25 @@ test('exportRows pone encabezados y convierte vacíos a texto vacío', () => {
 test('filterDecisions mantiene en su lugar las filas recién revisadas (keep) aunque ya no sean de la pestaña', () => {
   const ids = filterDecisions(active, archived, 'pending', '', new Set(['b'])).map((d) => d.id);
   assert.deepEqual(ids, ['a', 'b']);
+});
+
+test('decisionDate usa meeting_date y si falta la fecha de la ruta de origen', () => {
+  assert.equal(decisionDate({ meeting_date: '2026-10-01T00:00:00Z', source_reference: 'x/2026-11-04 r/a.md' }), '2026-10-01');
+  assert.equal(decisionDate({ meeting_date: null, source_reference: 'x/2026-11-04 r/a.md' }), '2026-11-04');
+  assert.equal(decisionDate({ source_file: 'a.md' }), '');
+});
+
+test('exportRows usa la fecha deducida de la ruta', () => {
+  const rows = exportRows([{ title: 't', source_reference: 'M/2026-11-04 r/a.md' }]);
+  const date = EXPORT_COLUMNS.findIndex((c) => c.header === 'Fecha de reunión');
+  assert.equal(rows[1][date], '2026-11-04');
+});
+
+test('sortByDateDesc ordena de más reciente a más antigua y deja sin fecha al final', () => {
+  const ids = sortByDateDesc([
+    { id: 'sin', source_file: 'a.md' },
+    { id: 'vieja', meeting_date: '2026-01-01' },
+    { id: 'nueva', source_reference: 'M/2026-11-04 r/a.md' },
+  ]).map((d) => d.id);
+  assert.deepEqual(ids, ['nueva', 'vieja', 'sin']);
 });

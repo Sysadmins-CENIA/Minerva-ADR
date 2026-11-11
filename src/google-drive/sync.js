@@ -3,6 +3,7 @@ import { sql } from '@forge/sql';
 import { createHash, randomUUID } from 'node:crypto';
 
 import { extractCandidates } from '../parser/extractor.js';
+import { dateFromPath } from '../shared/dates.js';
 
 import {
   GOOGLE_FOLDER_MIME,
@@ -392,6 +393,13 @@ async function processDriveFile({
 
     const candidates =
       extraction.candidates || [];
+
+    // El parser sólo ve el nombre del archivo (forma parte del hash anti-duplicados);
+    // la fecha suele estar en la carpeta de la reunión, así que se completa aquí.
+    const pathDate = dateFromPath(sourcePath);
+    for (const candidate of candidates) {
+      candidate.meeting_date = candidate.meeting_date || pathDate;
+    }
 
     let inserted = 0;
     let duplicates = 0;

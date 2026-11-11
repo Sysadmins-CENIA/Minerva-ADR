@@ -1,5 +1,7 @@
 // Lógica pura de la vista de decisiones (sin UI Kit), para poder testearla con node --test.
 
+import { dateFromPath } from '../shared/dates.js';
+
 export const REVIEW = {
   pending: 'Pendiente de revisión',
   validated: 'Validado',
@@ -67,13 +69,22 @@ export const toggleAll = (set, ids) => {
 
 export const formatDate = (value) => (value ? String(value).slice(0, 10) : '');
 
+// Fecha de reunión; las decisiones importadas antes de guardar la fecha de la
+// carpeta la recuperan desde la ruta de origen.
+export const decisionDate = (d) =>
+  formatDate(d.meeting_date) || dateFromPath(d.source_reference || d.source_file) || '';
+
+// Más recientes primero; sin fecha al final.
+export const sortByDateDesc = (decisions) =>
+  [...decisions].sort((a, b) => (decisionDate(b) || '').localeCompare(decisionDate(a) || ''));
+
 export const EXPORT_COLUMNS = [
   { header: 'Título', value: (d) => d.title, width: 40 },
   { header: 'Decisión', value: (d) => d.decision, width: 60 },
   { header: 'Contexto', value: (d) => d.context, width: 60 },
   { header: 'Proyecto', value: (d) => d.job, width: 22 },
   { header: 'Responsable', value: (d) => d.decision_owner, width: 28 },
-  { header: 'Fecha de reunión', value: (d) => formatDate(d.meeting_date), width: 16 },
+  { header: 'Fecha de reunión', value: decisionDate, width: 16 },
   { header: 'Estado de la decisión', value: (d) => d.status, width: 20 },
   { header: 'Revisión', value: (d) => d.review_status, width: 22 },
   { header: 'Origen', value: (d) => d.source_reference || d.source_file, width: 50 },

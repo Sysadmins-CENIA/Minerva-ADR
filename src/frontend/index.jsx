@@ -44,7 +44,8 @@ import {
   countByTab,
   exportRows,
   filterDecisions,
-  formatDate,
+  decisionDate,
+  sortByDateDesc,
   toggleAll,
   toggleId,
 } from './decisions.js';
@@ -93,7 +94,7 @@ const titleStyle = xcss({ textAlign: 'left', width: '100%' });
 // Sin esto, con pocas filas la tabla y el buscador se encogen al ancho del contenido.
 const fullWidth = xcss({ width: '100%' });
 
-const subtitle = (d) => [d.job, formatDate(d.meeting_date)].filter(Boolean).join(' · ');
+const subtitle = (d) => d.job || '';
 
 // Llama a un resolver y lanza error si no responde success.
 const call = async (name, payload, failMessage) => {
@@ -271,7 +272,7 @@ const App = () => {
 
   const tab = TABS[tabIndex];
   const counts = countByTab(active, archived);
-  const visible = filterDecisions(active, archived, tab.id, query, keep);
+  const visible = sortByDateDesc(filterDecisions(active, archived, tab.id, query, keep));
   const visibleIds = visible.map((d) => d.id);
   const selectedIds = [...selected];
   const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
@@ -583,10 +584,11 @@ const App = () => {
   const head = {
     cells: [
       { key: 'select', content: '', width: 4 },
-      { key: 'title', content: 'Decisión', isSortable: true, width: showReview ? 40 : 52 },
-      { key: 'owner', content: 'Responsable', isSortable: true, width: showReview ? 18 : 20 },
+      { key: 'title', content: 'Decisión', isSortable: true, width: showReview ? 34 : 44 },
+      { key: 'owner', content: 'Responsable', isSortable: true, width: showReview ? 16 : 18 },
+      { key: 'date', content: 'Fecha', isSortable: true, width: 10 },
       ...(showReview ? [{ key: 'review', content: 'Revisión', width: 14 }] : []),
-      { key: 'actions', content: '', width: 24 },
+      { key: 'actions', content: '', width: showReview ? 22 : 24 },
     ],
   };
 
@@ -663,6 +665,7 @@ const App = () => {
         ),
       },
       { key: (d.decision_owner || '').toLowerCase(), content: <Text maxLines={2}>{d.decision_owner || '—'}</Text> },
+      { key: decisionDate(d), content: <Text>{decisionDate(d) || '—'}</Text> },
       ...(showReview
         ? [{
           key: 'review',
@@ -782,6 +785,8 @@ const App = () => {
         rows={rows}
         rowsPerPage={PAGE_SIZE}
         isFixedSize
+        defaultSortKey="date"
+        defaultSortOrder="DESC"
         isLoading={loading}
         emptyView={<Text>{query ? 'Ninguna decisión coincide con la búsqueda.' : 'No hay decisiones en esta vista.'}</Text>}
       />
@@ -822,7 +827,7 @@ const App = () => {
             <Inline space="space.400" shouldWrap>
               <Meta label="Proyecto" value={detail.job} />
               <Meta label="Responsable" value={detail.decision_owner} />
-              <Meta label="Fecha de reunión" value={formatDate(detail.meeting_date)} />
+              <Meta label="Fecha de reunión" value={decisionDate(detail)} />
             </Inline>
             <Stack space="space.075">
               <Heading size="xsmall">Decisión</Heading>
