@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 
 import { extractCandidates } from '../parser/extractor.js';
 import { syncDriveMarkdown } from '../google-drive/sync.js';
+import { assertId, assertIds } from './validation.js';
 
 const GOOGLE_REQUIRED_SCOPES = [
   'https://www.googleapis.com/auth/drive.readonly',
@@ -103,17 +104,6 @@ async function authorizedSpace(context) {
   }
 
   return spaceId;
-}
-
-function assertId(id) {
-  if (
-    typeof id !== 'string' ||
-    !/^[0-9a-fA-F-]{36}$/.test(id)
-  ) {
-    throw new Error('Identificador ADR no válido.');
-  }
-
-  return id;
 }
 
 function optionalText(value, maxLength = null) {
@@ -1207,6 +1197,56 @@ syncDriveMarkdown: async ({ context, payload }) => {
       id,
       message:
         'Candidato eliminado definitivamente.',
+    };
+  },
+
+  // ----------------------------------------------------------
+  // ADR - ACCIONES MASIVAS
+  // Una sola sentencia por operación; el filtro por space_id
+  // garantiza que ids de otro espacio simplemente no se tocan.
+  // ----------------------------------------------------------
+
+  archiveCandidates: async ({ payload, context }) => {
+    const spaceId = await authorizedSpace(context);
+    const ids = assertIds(payload?.ids);
+    const marks = ids.map(() => '?').join(', ');
+
+    const result = await sql
+      .prepare(`
+        UPDATE adr_candidates
+        SET
+          archived_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE space_id = ?
+          AND archived_at IS NULL
+          AND id IN (${marks})
+      `)
+      .bindParams(spaceId, ...ids)
+      .execute();
+
+    return {
+      success: true,
+      count: result.rows?.affectedRows ?? ids.length,
+    };
+  },
+
+  deleteCandidates: async ({ payload, context }) => {
+    const spaceId = await authorizedSpace(context);
+    const ids = assertIds(payload?.ids);
+    const marks = ids.map(() => '?').join(', ');
+
+    const result = await sql
+      .prepare(`
+        DELETE FROM adr_candidates
+        WHERE space_id = ?
+          AND id IN (${marks})
+      `)
+      .bindParams(spaceId, ...ids)
+      .execute();
+
+    return {
+      success: true,
+      count: result.rows?.affectedRows ?? ids.length,
     };
   },
 });

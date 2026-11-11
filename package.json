@@ -6,7 +6,8 @@
   "license": "MIT",
   "private": true,
   "scripts": {
-    "lint": "eslint \"src/**/*.js\" \"src/**/*.jsx\""
+    "lint": "eslint \"src/**/*.js\" \"src/**/*.jsx\"",
+    "test": "node --test test/"
   },
   "devDependencies": {
     "eslint": "^8.56.0",
@@ -19,6 +20,7 @@
     "@forge/resolver": "2.0.2-next.0",
     "@forge/sql": "^4.0.9",
     "react": "^18.2.0",
+    "write-excel-file": "^4.1.1",
     "zod": "^4.6.7"
   }
 }

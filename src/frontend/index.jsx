@@ -1,51 +1,64 @@
-
-import React, {
-  useCallback,
-  useEffect,
-  useState,
-} from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 
 import ForgeReconciler, {
   useProductContext,
   Box,
   Button,
+  Checkbox,
+  DatePicker,
+  DynamicTable,
+  EmptyState,
   FilePicker,
   Heading,
   Inline,
+  LoadingButton,
   Lozenge,
+  Modal,
+  Pressable,
+  ModalBody,
+  ModalFooter,
+  ModalHeader,
+  ModalTitle,
+  ModalTransition,
   SectionMessage,
+  Select,
   Spinner,
   Stack,
+  Tab,
+  TabList,
+  TabPanel,
+  Tabs,
   Text,
-  Textfield,
   TextArea,
-  Select,
+  Textfield,
+  xcss,
 } from '@forge/react';
 
-import { invoke } from '@forge/bridge';
+import { invoke, showFlag } from '@forge/bridge';
+import writeExcelFile from 'write-excel-file/browser';
+
+import {
+  REVIEW,
+  TABS,
+  EXPORT_COLUMNS,
+  countByTab,
+  exportRows,
+  filterDecisions,
+  formatDate,
+  toggleAll,
+  toggleId,
+} from './decisions.js';
+
+// ============================================================
+// CONSTANTES
+// ============================================================
 
 const PAGE_SIZE = 10;
 
-const REVIEW_STATUSES = [
-  { label: 'Pendiente de revisión', value: 'Pendiente de revisión' },
-  { label: 'Validado', value: 'Validado' },
-  { label: 'Descartado', value: 'Descartado' },
-];
+const REVIEW_OPTIONS = Object.values(REVIEW).map((v) => ({ label: v, value: v }));
 
-const DECISION_STATUSES = [
-  { label: 'Propuesto', value: 'Propuesto' },
-  { label: 'En discusión', value: 'En discusión' },
-  { label: 'Aprobada', value: 'Aprobada' },
-  { label: 'Rechazada', value: 'Rechazada' },
-  { label: 'Obsoleta', value: 'Obsoleta' },
-];
-
-const FILTERS = [
-  { label: 'Todos', value: 'all' },
-  { label: 'Pendientes', value: 'Pendiente de revisión' },
-  { label: 'Validados', value: 'Validado' },
-  { label: 'Descartados', value: 'Descartado' },
-];
+const DECISION_STATUSES = ['Propuesto', 'En discusión', 'Aprobada', 'Rechazada', 'Obsoleta']
+  .map((v) => ({ label: v, value: v }));
 
 const EMPTY_FORM = {
   title: '',
@@ -57,22 +70,11 @@ const EMPTY_FORM = {
   source_reference: '',
 };
 
-const EMPTY_EDIT = {
-  title: '',
-  decision: '',
-  context: '',
-  job: '',
-  decision_owner: '',
-  status: 'Propuesto',
-  review_status: 'Pendiente de revisión',
-};
-
-const errorMessage = (error) =>
-  error?.message || 'Ocurrió un error desconocido.';
+const errorMessage = (error) => error?.message || 'Ocurrió un error desconocido.';
 
 const reviewAppearance = (value) => {
-  if (value === 'Validado') return 'success';
-  if (value === 'Descartado') return 'removed';
+  if (value === REVIEW.validated) return 'success';
+  if (value === REVIEW.discarded) return 'removed';
   return 'inprogress';
 };
 
@@ -83,260 +85,434 @@ const decisionAppearance = (value) => {
   return 'default';
 };
 
-const formatDate = (value) => {
-  if (!value) return '';
-  return String(value).slice(0, 10);
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+// Título de fila clicable con aspecto de enlace (un Button se ve como botón gris centrado).
+const titleStyle = xcss({ textAlign: 'left', width: '100%' });
+
+// Sin esto, con pocas filas la tabla y el buscador se encogen al ancho del contenido.
+const fullWidth = xcss({ width: '100%' });
+
+const subtitle = (d) => [d.job, formatDate(d.meeting_date)].filter(Boolean).join(' · ');
+
+// Llama a un resolver y lanza error si no responde success.
+const call = async (name, payload, failMessage) => {
+  const result = await invoke(name, payload);
+  if (!result?.success) throw new Error(failMessage);
+  return result;
 };
 
-const Field = ({
-  label,
-  value,
-  onChange,
-  multiline = false,
-  placeholder = '',
-}) => (
+// Campo con etiqueta (UI Kit no trae label integrado en Textfield).
+const Field = ({ label, required, value, onChange, multiline, placeholder }) => (
   <Stack space="space.050">
-    <Text weight="semibold">{label}</Text>
+    <Text weight="semibold">
+      {label}
+      {required ? ' *' : ''}
+    </Text>
     {multiline ? (
       <TextArea
         value={value || ''}
-        onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
       />
     ) : (
       <Textfield
         value={value || ''}
-        onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
       />
     )}
   </Stack>
 );
 
+const SelectField = ({ label, options, value, onChange }) => (
+  <Stack space="space.050">
+    <Text weight="semibold">{label}</Text>
+    <Select
+      options={options}
+      value={options.find((o) => o.value === value) || options[0]}
+      onChange={(o) => onChange(o?.value || options[0].value)}
+    />
+  </Stack>
+);
+
+const Meta = ({ label, value }) =>
+  value ? (
+    <Stack space="space.025">
+      <Text size="small" color="color.text.subtlest">{label}</Text>
+      <Text>{value}</Text>
+    </Stack>
+  ) : null;
+
+// ============================================================
+// APP
+// ============================================================
+
 const App = () => {
-
   const productContext = useProductContext();
+  const spaceKey = productContext?.extension?.space?.key || 'espacio';
 
-  const spaceName =
-    productContext?.extension?.space?.key || null;
-
-  // ==========================================================
-  // NAVEGACIÓN
-  // ==========================================================
-
-  const [view, setView] = useState('decisions');
-  const [activeView, setActiveView] = useState('active');
-  const [reviewFilter, setReviewFilter] = useState('all');
-  const [currentPage, setCurrentPage] = useState(1);
-  const [expandedId, setExpandedId] = useState(null);
-
-  // ==========================================================
-  // ESTADO GENERAL
-  // ==========================================================
-
-  const [candidates, setCandidates] = useState([]);
-  const [archivedCandidates, setArchivedCandidates] = useState([]);
+  // ---------------- datos ----------------
+  const [active, setActive] = useState([]);
+  const [archived, setArchived] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-  const [notice, setNotice] = useState(null);
+  const [loadError, setLoadError] = useState(null);
 
-  // ==========================================================
-  // FORMULARIOS
-  // ==========================================================
+  // ---------------- vista ----------------
+  const [tabIndex, setTabIndex] = useState(0);
+  const [query, setQuery] = useState('');
+  const [selected, setSelected] = useState(new Set());
+  const [keep, setKeep] = useState(new Set()); // revisadas que siguen en su fila hasta cambiar de vista
+  const [rowBusy, setRowBusy] = useState({}); // id -> acción en curso
+  const [bulkBusy, setBulkBusy] = useState(null); // 'archive' | 'delete' | null
+  const [exporting, setExporting] = useState(false);
+  const [banner, setBanner] = useState(null); // respaldo si showFlag no está disponible
 
+  // ---------------- modales ----------------
+  const [detailId, setDetailId] = useState(null);
+  const [editForm, setEditForm] = useState(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(null); // { ids: [] }
+  const [showImport, setShowImport] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+
+  // ---------------- importar / crear ----------------
   const [selectedFile, setSelectedFile] = useState(null);
+  const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState(null);
   const [manualForm, setManualForm] = useState(EMPTY_FORM);
+  const [creating, setCreating] = useState(false);
 
-  const [editingId, setEditingId] = useState(null);
-  const [editForm, setEditForm] = useState(EMPTY_EDIT);
-  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
-
-  // ==========================================================
-  // GOOGLE
-  // ==========================================================
-
+  // ---------------- Google Drive ----------------
   const [googleAccount, setGoogleAccount] = useState(null);
   const [googleLoading, setGoogleLoading] = useState(true);
   const [googleConnecting, setGoogleConnecting] = useState(false);
-  const [googleError, setGoogleError] = useState(null);
-
-  const [savedDriveFolder, setSavedDriveFolder] = useState(null);
-  const [driveConfigLoading, setDriveConfigLoading] = useState(true);
-  const [driveSaving, setDriveSaving] = useState(false);
-
-  const [showDriveSettings, setShowDriveSettings] = useState(false);
+  const [savedFolder, setSavedFolder] = useState(null);
+  const [driveError, setDriveError] = useState(null);
   const [preferredFolders, setPreferredFolders] = useState([]);
   const [preferredLoading, setPreferredLoading] = useState(false);
-
   const [driveQuery, setDriveQuery] = useState('');
   const [driveMatches, setDriveMatches] = useState([]);
   const [driveSearching, setDriveSearching] = useState(false);
+  const [candidateFolder, setCandidateFolder] = useState(null);
+  const [folderPreview, setFolderPreview] = useState(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [folderSaving, setFolderSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncReport, setSyncReport] = useState(null);
 
-  const [selectedDriveFolder, setSelectedDriveFolder] = useState(null);
-  const [drivePreview, setDrivePreview] = useState(null);
-  const [drivePreviewLoading, setDrivePreviewLoading] = useState(false);
-  const [driveError, setDriveError] = useState(null);
-  const [driveNotice, setDriveNotice] = useState(null);
-  const [syncLoading, setSyncLoading] = useState(false);
-  const [syncResult, setSyncResult] = useState(null);
-  const [syncError, setSyncError] = useState(null);
+  // ============================================================
+  // NOTIFICACIONES
+  // ============================================================
 
-  // ==========================================================
-  // CARGA DE CANDIDATOS
-  // ==========================================================
-
-  const refreshCandidates = useCallback(async () => {
+  // Flag nativo de Atlassian (abajo a la izquierda, visible sin importar el scroll).
+  const notify = useCallback((type, title, description) => {
     try {
-      const [active, archived] = await Promise.all([
-        invoke('getCandidates'),
-        invoke('getArchivedCandidates'),
+      showFlag({
+        id: `${Date.now()}-${Math.random()}`,
+        title,
+        description,
+        type,
+        appearance: type === 'error' ? 'error' : undefined,
+        isAutoDismiss: type !== 'error',
+      });
+    } catch {
+      setBanner({ type, title, description });
+    }
+  }, []);
+
+  const fail = useCallback((err) => notify('error', 'No se pudo completar', errorMessage(err)), [notify]);
+
+  // ============================================================
+  // CARGA
+  // ============================================================
+
+  const loadDecisions = useCallback(async () => {
+    try {
+      const [a, z] = await Promise.all([
+        call('getCandidates', undefined, 'No se pudieron cargar las decisiones.'),
+        call('getArchivedCandidates', undefined, 'No se pudieron cargar las decisiones.'),
       ]);
-
-      if (!active?.success || !archived?.success) {
-        throw new Error('No se pudieron cargar las decisiones.');
-      }
-
-      setCandidates(active.candidates || []);
-      setArchivedCandidates(archived.candidates || []);
+      setActive(a.candidates || []);
+      setArchived(z.candidates || []);
+      setLoadError(null);
     } catch (err) {
-      setError(errorMessage(err));
+      setLoadError(errorMessage(err));
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // ==========================================================
-  // GOOGLE - CARGA INICIAL
-  // ==========================================================
-
-  const loadGoogleAccount = useCallback(async () => {
+  const loadGoogle = useCallback(async () => {
     setGoogleLoading(true);
-
     try {
-      const result = await invoke('getGoogleAccount');
-
-      setGoogleAccount(
-        result?.connected ? result.account : null
-      );
-      setGoogleError(null);
+      const [account, folder] = await Promise.all([
+        invoke('getGoogleAccount'),
+        invoke('getDriveFolderConfig'),
+      ]);
+      setGoogleAccount(account?.connected ? account.account : null);
+      setSavedFolder(folder?.success && folder.configured ? folder.folder : null);
     } catch (err) {
-      setGoogleAccount(null);
-      setGoogleError(errorMessage(err));
+      setDriveError(errorMessage(err));
     } finally {
       setGoogleLoading(false);
     }
   }, []);
 
-  const loadDriveConfig = useCallback(async () => {
-    setDriveConfigLoading(true);
-
-    try {
-      const result = await invoke('getDriveFolderConfig');
-
-      if (!result?.success) {
-        throw new Error('No se pudo recuperar la configuración.');
-      }
-
-      const folder = result.configured
-        ? result.folder
-        : null;
-
-      setSavedDriveFolder(folder);
-      setSelectedDriveFolder((previous) => previous || folder);
-    } catch (err) {
-      setDriveError(errorMessage(err));
-    } finally {
-      setDriveConfigLoading(false);
-    }
-  }, []);
-
   useEffect(() => {
-    refreshCandidates();
-    loadGoogleAccount();
-    loadDriveConfig();
-  }, [
-    refreshCandidates,
-    loadGoogleAccount,
-    loadDriveConfig,
-  ]);
+    loadDecisions();
+    loadGoogle();
+  }, [loadDecisions, loadGoogle]);
 
-  // ==========================================================
-  // GOOGLE - ACCIONES
-  // ==========================================================
+  // ============================================================
+  // DERIVADOS
+  // ============================================================
 
-  const handleConnectGoogle = async () => {
+  const tab = TABS[tabIndex];
+  const counts = countByTab(active, archived);
+  const visible = filterDecisions(active, archived, tab.id, query, keep);
+  const visibleIds = visible.map((d) => d.id);
+  const selectedIds = [...selected];
+  const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
+  const someSelected = !allSelected && visibleIds.some((id) => selected.has(id));
+  const detail = [...active, ...archived].find((d) => d.id === detailId) || null;
+  const isArchivedTab = tab.id === 'archived';
+
+  const changeTab = (index) => {
+    setTabIndex(index);
+    setSelected(new Set());
+    setKeep(new Set());
+  };
+
+  const changeQuery = (value) => {
+    setQuery(value);
+    setSelected(new Set());
+    setKeep(new Set());
+  };
+
+  // ============================================================
+  // ACCIONES POR FILA (sin recargar todo: se actualiza el estado local)
+  // ============================================================
+
+  const setReview = async (decision, reviewStatus) => {
+    setRowBusy((b) => ({ ...b, [decision.id]: reviewStatus }));
+    try {
+      await call('updateReviewStatus', { id: decision.id, reviewStatus }, 'No se pudo actualizar la revisión.');
+      setActive((list) =>
+        list.map((d) => (d.id === decision.id ? { ...d, review_status: reviewStatus } : d))
+      );
+      setKeep((k) => new Set(k).add(decision.id));
+      notify(
+        'success',
+        reviewStatus === REVIEW.validated ? 'Decisión validada' : 'Decisión descartada',
+        decision.title
+      );
+    } catch (err) {
+      fail(err);
+    } finally {
+      setRowBusy(({ [decision.id]: _, ...rest }) => rest);
+    }
+  };
+
+  const restore = async (decision) => {
+    setRowBusy((b) => ({ ...b, [decision.id]: 'restore' }));
+    try {
+      await call('restoreCandidate', { id: decision.id }, 'No se pudo restaurar la decisión.');
+      setArchived((list) => list.filter((d) => d.id !== decision.id));
+      setActive((list) => [{ ...decision, archived_at: null }, ...list]);
+      notify('success', 'Decisión restaurada', decision.title);
+    } catch (err) {
+      fail(err);
+    } finally {
+      setRowBusy(({ [decision.id]: _, ...rest }) => rest);
+    }
+  };
+
+  // ============================================================
+  // ACCIONES MASIVAS (también usadas para una sola decisión)
+  // ============================================================
+
+  const archiveIds = async (ids) => {
+    setBulkBusy('archive');
+    try {
+      await call('archiveCandidates', { ids }, 'No se pudieron archivar las decisiones.');
+      const moved = active.filter((d) => ids.includes(d.id));
+      const now = new Date().toISOString();
+      setActive((list) => list.filter((d) => !ids.includes(d.id)));
+      setArchived((list) => [...moved.map((d) => ({ ...d, archived_at: now })), ...list]);
+      setSelected(new Set());
+      setDetailId(null);
+      notify('success', `${plural(moved.length, 'decisión archivada', 'decisiones archivadas')}`);
+    } catch (err) {
+      fail(err);
+    } finally {
+      setBulkBusy(null);
+    }
+  };
+
+  const deleteIds = async (ids) => {
+    setBulkBusy('delete');
+    try {
+      await call('deleteCandidates', { ids }, 'No se pudieron eliminar las decisiones.');
+      setActive((list) => list.filter((d) => !ids.includes(d.id)));
+      setArchived((list) => list.filter((d) => !ids.includes(d.id)));
+      setSelected(new Set());
+      setDetailId(null);
+      setConfirmDelete(null);
+      notify('success', `${plural(ids.length, 'decisión eliminada', 'decisiones eliminadas')}`);
+    } catch (err) {
+      fail(err);
+    } finally {
+      setBulkBusy(null);
+    }
+  };
+
+  // ============================================================
+  // EXPORTAR A EXCEL
+  // ============================================================
+
+  const exportExcel = async (decisions, label) => {
+    setExporting(true);
+    try {
+      const [header, ...body] = exportRows(decisions);
+      const sheetData = [
+        header.map((value) => ({ value, fontWeight: 'bold', backgroundColor: '#DEEBFF' })),
+        ...body.map((row) => row.map((value) => ({ value }))),
+      ];
+      const today = new Date().toISOString().slice(0, 10);
+      await writeExcelFile(sheetData, {
+        sheet: 'Decisiones',
+        stickyRowsCount: 1,
+        columns: EXPORT_COLUMNS.map((c) => ({ width: c.width })),
+      }).toFile(`minerva-adr-${spaceKey}-${label}-${today}.xlsx`);
+      notify('success', 'Excel generado', plural(decisions.length, 'decisión exportada', 'decisiones exportadas'));
+    } catch (err) {
+      fail(err);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  // ============================================================
+  // EDITAR (desde el detalle)
+  // ============================================================
+
+  const startEdit = (d) =>
+    setEditForm({
+      title: d.title || '',
+      decision: d.decision || '',
+      context: d.context || '',
+      job: d.job || '',
+      decision_owner: d.decision_owner || '',
+      status: d.status || 'Propuesto',
+      review_status: d.review_status || REVIEW.pending,
+    });
+
+  const saveEdit = async () => {
+    setSavingEdit(true);
+    try {
+      await call('updateCandidate', { id: detailId, ...editForm }, 'No se pudo guardar la decisión.');
+      setActive((list) => list.map((d) => (d.id === detailId ? { ...d, ...editForm } : d)));
+      setEditForm(null);
+      notify('success', 'Cambios guardados');
+    } catch (err) {
+      fail(err);
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const closeDetail = () => {
+    setDetailId(null);
+    setEditForm(null);
+  };
+
+  // ============================================================
+  // IMPORTAR / CREAR
+  // ============================================================
+
+  const handleImport = async () => {
+    setImporting(true);
+    setImportResult(null);
+    try {
+      const file = Array.isArray(selectedFile) ? selectedFile[0] : selectedFile;
+      const data = typeof file === 'string' ? file : file?.base64 || file?.data;
+      if (!data) throw new Error('No se pudo leer el archivo Markdown.');
+      const result = await call(
+        'processMarkdown',
+        { data, sourceFile: file?.name || 'minuta.md' },
+        'No se pudo procesar la minuta.'
+      );
+      setImportResult(result);
+      await loadDecisions();
+    } catch (err) {
+      fail(err);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const handleCreate = async () => {
+    if (!manualForm.title.trim() || !manualForm.decision.trim()) {
+      notify('warning', 'Faltan datos', 'Título y decisión son obligatorios.');
+      return;
+    }
+    setCreating(true);
+    try {
+      await call('createManualCandidate', manualForm, 'No se pudo crear la decisión.');
+      setManualForm(EMPTY_FORM);
+      setShowCreate(false);
+      changeTab(0);
+      await loadDecisions();
+      notify('success', 'Decisión creada', 'Quedó pendiente de revisión.');
+    } catch (err) {
+      fail(err);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  // ============================================================
+  // GOOGLE DRIVE
+  // ============================================================
+
+  const connectGoogle = async () => {
     setGoogleConnecting(true);
-    setGoogleError(null);
-
+    setDriveError(null);
     try {
       const result = await invoke('connectGoogle');
-
-      if (result?.connected && result.account) {
-        setGoogleAccount(result.account);
-      } else {
-        await loadGoogleAccount();
-      }
+      if (result?.connected && result.account) setGoogleAccount(result.account);
+      else await loadGoogle();
     } catch (err) {
-      if (err?.name === 'NEEDS_AUTHENTICATION_ERR') {
-        throw err;
-      }
-      setGoogleError(errorMessage(err));
+      if (err?.name === 'NEEDS_AUTHENTICATION_ERR') throw err; // Forge muestra el consentimiento OAuth
+      setDriveError(errorMessage(err));
     } finally {
       setGoogleConnecting(false);
     }
   };
 
-  const loadPreferredFolders = async () => {
-    setPreferredLoading(true);
-    setDriveError(null);
-
-    try {
-      const result = await invoke('getPreferredDriveFolders');
-
-      if (!result?.success) {
-        throw new Error('No se encontraron las carpetas.');
+  const openSettings = async () => {
+    setShowSettings(true);
+    if (googleAccount && preferredFolders.length === 0) {
+      setPreferredLoading(true);
+      try {
+        const result = await call('getPreferredDriveFolders', undefined, 'No se encontraron carpetas.');
+        setPreferredFolders(result.folders || []);
+      } catch (err) {
+        setDriveError(errorMessage(err));
+      } finally {
+        setPreferredLoading(false);
       }
-
-      setPreferredFolders(result.folders || []);
-    } catch (err) {
-      setDriveError(errorMessage(err));
-    } finally {
-      setPreferredLoading(false);
     }
   };
 
-  const handleToggleDriveSettings = () => {
-    if (!showDriveSettings && googleAccount) {
-      loadPreferredFolders();
-    }
-
-    setShowDriveSettings(!showDriveSettings);
-  };
-
-  const handleSearchFolders = async () => {
-    const query = driveQuery.trim();
-
-    if (query.length < 2) {
-      setDriveError('Escribe al menos dos caracteres.');
-      return;
-    }
-
+  const searchFolders = async () => {
     setDriveSearching(true);
     setDriveMatches([]);
     setDriveError(null);
-
     try {
-      const result = await invoke(
-        'searchDriveFolders',
-        { query }
-      );
-
-      if (!result?.success) {
-        throw new Error('No se pudo buscar la carpeta.');
-      }
-
+      const result = await call('searchDriveFolders', { query: driveQuery.trim() }, 'No se pudo buscar la carpeta.');
       setDriveMatches(result.folders || []);
     } catch (err) {
       setDriveError(errorMessage(err));
@@ -345,1812 +521,630 @@ const App = () => {
     }
   };
 
-  const handleSelectFolder = async (folder) => {
-    setSelectedDriveFolder(folder);
-    setDrivePreview(null);
+  const previewFolder = async (folder) => {
+    setCandidateFolder(folder);
+    setFolderPreview(null);
     setDriveError(null);
-    setDriveNotice(null);
-    setDrivePreviewLoading(true);
-
+    setPreviewLoading(true);
     try {
-      const result = await invoke(
-        'previewDriveFolder',
-        { folderId: folder.id }
-      );
-
-      if (!result?.success) {
-        throw new Error('No se pudo explorar la carpeta.');
-      }
-
-      setDrivePreview(result);
+      setFolderPreview(await call('previewDriveFolder', { folderId: folder.id }, 'No se pudo explorar la carpeta.'));
     } catch (err) {
       setDriveError(errorMessage(err));
     } finally {
-      setDrivePreviewLoading(false);
+      setPreviewLoading(false);
     }
   };
 
-  const handleSaveFolder = async () => {
-    if (!selectedDriveFolder?.id || !drivePreview) {
-      setDriveError('Selecciona y explora una carpeta válida.');
-      return;
-    }
-
-    setDriveSaving(true);
-    setDriveError(null);
-    setDriveNotice(null);
-
+  const saveFolder = async () => {
+    setFolderSaving(true);
     try {
-      const result = await invoke(
-        'saveDriveFolderConfig',
-        { folderId: selectedDriveFolder.id }
-      );
-
-      if (!result?.success || !result.folder) {
-        throw new Error('No se pudo guardar la carpeta.');
-      }
-
-      setSavedDriveFolder(result.folder);
-      setSelectedDriveFolder(result.folder);
-      setDriveNotice('Carpeta guardada correctamente.');
+      const result = await call('saveDriveFolderConfig', { folderId: candidateFolder.id }, 'No se pudo guardar la carpeta.');
+      setSavedFolder(result.folder);
+      setCandidateFolder(null);
+      setFolderPreview(null);
+      notify('success', 'Carpeta guardada', result.folder?.name);
     } catch (err) {
       setDriveError(errorMessage(err));
     } finally {
-      setDriveSaving(false);
+      setFolderSaving(false);
     }
   };
 
-
-  // ==========================================================
-  // GOOGLE DRIVE - SINCRONIZACIÓN MANUAL
-  // ==========================================================
-
-  const handleSyncDrive = async (reprocess = false) => {
-    if (syncLoading || !savedDriveFolder) {
+  const syncDrive = async (reprocess = false) => {
+    if (!savedFolder) {
+      openSettings();
       return;
     }
-
-    setSyncLoading(true);
-    setSyncResult(null);
-    setSyncError(null);
-    setError(null);
-
+    setSyncing(true);
+    setSyncReport(null);
     try {
-      const result = await invoke('syncDriveMarkdown', {
-        reprocess,
-      });
-
-      if (!result?.success) {
-        throw new Error(
-          'No fue posible completar la sincronización.'
-        );
-      }
-
-      setSyncResult(result);
-      await refreshCandidates();
-    } catch (err) {
-      setSyncError(errorMessage(err));
-    } finally {
-      setSyncLoading(false);
-    }
-  };
-
-
-  // ==========================================================
-  // IMPORTAR MARKDOWN
-  // ==========================================================
-
-  const handleFileChange = (files) => {
-    const file = Array.isArray(files) ? files[0] : files;
-    setSelectedFile(file || null);
-    setImportResult(null);
-  };
-
-  const handleImport = async () => {
-    if (!selectedFile) return;
-
-    setBusy(true);
-    setError(null);
-    setImportResult(null);
-
-    try {
-      let data;
-
-      if (typeof selectedFile === 'string') {
-        data = selectedFile;
-      } else {
-        data = selectedFile.base64 || selectedFile.data;
-      }
-
-      if (!data) {
-        throw new Error('No se pudo leer el archivo Markdown.');
-      }
-
-      const result = await invoke('processMarkdown', {
-        data,
-        sourceFile: selectedFile.name || 'minuta.md',
-      });
-
-      if (!result?.success) {
-        throw new Error('No se pudo procesar la minuta.');
-      }
-
-      setImportResult(result);
-      await refreshCandidates();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // ==========================================================
-  // CREAR CANDIDATO
-  // ==========================================================
-
-  const handleCreateManual = async () => {
-    if (
-      !manualForm.title.trim() ||
-      !manualForm.decision.trim()
-    ) {
-      setError('Título y decisión son obligatorios.');
-      return;
-    }
-
-    setBusy(true);
-    setError(null);
-
-    try {
-      const result = await invoke(
-        'createManualCandidate',
-        manualForm
+      const result = await call('syncDriveMarkdown', { reprocess }, 'No fue posible completar la sincronización.');
+      await loadDecisions();
+      if (result.errors?.length || result.truncated) setSyncReport(result);
+      notify(
+        result.errors?.length ? 'warning' : 'success',
+        'Sincronización terminada',
+        `${plural(result.inserted || 0, 'decisión nueva', 'decisiones nuevas')} · ${plural(result.filesProcessed || 0, 'minuta leída', 'minutas leídas')}`
       );
-
-      if (!result?.success) {
-        throw new Error('No se pudo crear el candidato.');
-      }
-
-      setManualForm(EMPTY_FORM);
-      setNotice('Candidato creado correctamente.');
-      setView('decisions');
-      await refreshCandidates();
     } catch (err) {
-      setError(errorMessage(err));
+      fail(err);
     } finally {
-      setBusy(false);
+      setSyncing(false);
     }
   };
 
-  // ==========================================================
-  // REVISAR
-  // ==========================================================
+  // ============================================================
+  // TABLA
+  // ============================================================
 
-  const handleReview = async (id, reviewStatus) => {
-    setBusy(true);
-    setError(null);
+  // En Pendientes/Validadas/Descartadas la pestaña ya dice el estado: la columna sobra.
+  const showReview = tab.id === 'all' || tab.id === 'archived';
 
-    try {
-      const result = await invoke(
-        'updateReviewStatus',
-        { id, reviewStatus }
+  const head = {
+    cells: [
+      { key: 'select', content: '', width: 4 },
+      { key: 'title', content: 'Decisión', isSortable: true, width: showReview ? 40 : 52 },
+      { key: 'owner', content: 'Responsable', isSortable: true, width: showReview ? 18 : 20 },
+      ...(showReview ? [{ key: 'review', content: 'Revisión', width: 14 }] : []),
+      { key: 'actions', content: '', width: 24 },
+    ],
+  };
+
+  // Validar y Descartar siempre ocupan el mismo lugar: el del estado actual queda
+  // deshabilitado en vez de desaparecer, así un doble clic no revierte la acción.
+  const rowActions = (d) => {
+    const busy = rowBusy[d.id];
+    if (isArchivedTab) {
+      return (
+        <LoadingButton spacing="compact" iconBefore="undo" isLoading={busy === 'restore'} onClick={() => restore(d)}>
+          Restaurar
+        </LoadingButton>
       );
-
-      if (!result?.success) {
-        throw new Error('No se pudo actualizar la revisión.');
-      }
-
-      setNotice(`Decisión marcada como ${reviewStatus}.`);
-      await refreshCandidates();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
-  };
-
-  // ==========================================================
-  // EDITAR
-  // ==========================================================
-
-  const handleStartEdit = (candidate) => {
-    setExpandedId(candidate.id);
-    setEditingId(candidate.id);
-
-    setEditForm({
-      title: candidate.title || '',
-      decision: candidate.decision || '',
-      context: candidate.context || '',
-      job: candidate.job || '',
-      decision_owner: candidate.decision_owner || '',
-      status: candidate.status || 'Propuesto',
-      review_status:
-        candidate.review_status || 'Pendiente de revisión',
-    });
-  };
-
-  const handleSaveEdit = async () => {
-    if (!editingId) return;
-
-    setBusy(true);
-    setError(null);
-
-    try {
-      const result = await invoke(
-        'updateCandidate',
-        { id: editingId, ...editForm }
-      );
-
-      if (!result?.success) {
-        throw new Error('No se pudo actualizar la decisión.');
-      }
-
-      setEditingId(null);
-      setEditForm(EMPTY_EDIT);
-      setNotice('Decisión actualizada correctamente.');
-      await refreshCandidates();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // ==========================================================
-  // ARCHIVAR / RESTAURAR / ELIMINAR
-  // ==========================================================
-
-  const handleAction = async (resolverName, id, message) => {
-    setBusy(true);
-    setError(null);
-
-    try {
-      const result = await invoke(
-        resolverName,
-        { id }
-      );
-
-      if (!result?.success) {
-        throw new Error('No se pudo completar la operación.');
-      }
-
-      setNotice(message);
-      setConfirmDeleteId(null);
-      setExpandedId(null);
-      await refreshCandidates();
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // ==========================================================
-  // ESTADÍSTICAS Y PAGINACIÓN
-  // ==========================================================
-
-  const pendingCount = candidates.filter(
-    (c) => c.review_status === 'Pendiente de revisión'
-  ).length;
-
-  const validatedCount = candidates.filter(
-    (c) => c.review_status === 'Validado'
-  ).length;
-
-  const discardedCount = candidates.filter(
-    (c) => c.review_status === 'Descartado'
-  ).length;
-
-  const sourceCandidates =
-    activeView === 'active'
-      ? candidates
-      : archivedCandidates;
-
-  const filteredCandidates = sourceCandidates.filter(
-    (c) =>
-      reviewFilter === 'all' ||
-      c.review_status === reviewFilter
-  );
-
-  const totalPages = Math.max(
-    1,
-    Math.ceil(filteredCandidates.length / PAGE_SIZE)
-  );
-
-  const safePage = Math.min(currentPage, totalPages);
-
-  const visibleCandidates = filteredCandidates.slice(
-    (safePage - 1) * PAGE_SIZE,
-    safePage * PAGE_SIZE
-  );
-
-  // ==========================================================
-  // FORMULARIO DE EDICIÓN
-  // ==========================================================
-
-  const renderEditForm = () => (
-    <Stack space="space.200">
-
-      <Heading size="small">Editar decisión</Heading>
-
-      <Field
-        label="Título"
-        value={editForm.title}
-        onChange={(value) =>
-          setEditForm((p) => ({ ...p, title: value }))
-        }
-      />
-
-      <Field
-        label="Decisión"
-        value={editForm.decision}
-        multiline
-        onChange={(value) =>
-          setEditForm((p) => ({ ...p, decision: value }))
-        }
-      />
-
-      <Field
-        label="Contexto"
-        value={editForm.context}
-        multiline
-        onChange={(value) =>
-          setEditForm((p) => ({ ...p, context: value }))
-        }
-      />
-
-      <Field
-        label="Proyecto"
-        value={editForm.job}
-        onChange={(value) =>
-          setEditForm((p) => ({ ...p, job: value }))
-        }
-      />
-
-      <Field
-        label="Responsable"
-        value={editForm.decision_owner}
-        onChange={(value) =>
-          setEditForm((p) => ({
-            ...p,
-            decision_owner: value,
-          }))
-        }
-      />
-
-      <Stack space="space.050">
-        <Text weight="semibold">Estado de decisión</Text>
-        <Select
-          options={DECISION_STATUSES}
-          value={
-            DECISION_STATUSES.find(
-              (o) => o.value === editForm.status
-            ) || DECISION_STATUSES[0]
-          }
-          onChange={(option) =>
-            setEditForm((p) => ({
-              ...p,
-              status: option?.value || 'Propuesto',
-            }))
-          }
-        />
-      </Stack>
-
-      <Stack space="space.050">
-        <Text weight="semibold">Estado de revisión</Text>
-        <Select
-          options={REVIEW_STATUSES}
-          value={
-            REVIEW_STATUSES.find(
-              (o) => o.value === editForm.review_status
-            ) || REVIEW_STATUSES[0]
-          }
-          onChange={(option) =>
-            setEditForm((p) => ({
-              ...p,
-              review_status:
-                option?.value || 'Pendiente de revisión',
-            }))
-          }
-        />
-      </Stack>
-
-      <Inline space="space.100">
-        <Button
-          appearance="primary"
-          isDisabled={busy}
-          onClick={handleSaveEdit}
-        >
-          Guardar cambios
-        </Button>
-
-        <Button
-          appearance="subtle"
-          onClick={() => setEditingId(null)}
-        >
-          Cancelar
-        </Button>
-      </Inline>
-
-    </Stack>
-  );
-
-  // ==========================================================
-  // TARJETA ADR COMPACTA
-  // ==========================================================
-
-
-  // ==========================================================
-  // TARJETA ADR - DISEÑO CON CONTENEDORES Y COLORES
-  // ==========================================================
-
-
-  // ==========================================================
-  // TARJETA ADR - DISEÑO DE ALTO CONTRASTE
-  // ==========================================================
-
-  const renderCandidate = (candidate) => {
-    const expanded = expandedId === candidate.id;
-    const editing = editingId === candidate.id;
-    const archived = activeView === 'archived';
-
-    const isValidated =
-      candidate.review_status === 'Validado';
-
-    const isDiscarded =
-      candidate.review_status === 'Descartado';
-
+    const review = d.review_status || REVIEW.pending;
     return (
-      <Box
-        key={candidate.id}
-        padding="space.400"
-        backgroundColor="color.background.neutral"
-        borderRadius="large"
-      >
-        <Stack space="space.300">
-
-          {/* ================================================ */}
-          {/* CABECERA */}
-          {/* ================================================ */}
-
-          <Stack space="space.150">
-
-            <Heading size="medium">
-              {candidate.title || 'Sin título'}
-            </Heading>
-
-            <Inline space="space.100" shouldWrap>
-
-              <Lozenge
-                appearance={reviewAppearance(
-                  candidate.review_status
-                )}
-              >
-                {candidate.review_status ||
-                  'Pendiente de revisión'}
-              </Lozenge>
-
-              <Lozenge
-                appearance={decisionAppearance(
-                  candidate.status
-                )}
-              >
-                {candidate.status || 'Propuesto'}
-              </Lozenge>
-
-              {archived && (
-                <Lozenge appearance="default">
-                  Archivada
-                </Lozenge>
-              )}
-
-            </Inline>
-
-          </Stack>
-
-          {/* ================================================ */}
-          {/* METADATOS */}
-          {/* ================================================ */}
-
-          <Box
-            padding="space.200"
-            backgroundColor="elevation.surface.raised"
-            borderRadius="medium"
-          >
-            <Inline space="space.300" shouldWrap>
-
-              {candidate.job && (
-                <Text size="small">
-                  Proyecto: {candidate.job}
-                </Text>
-              )}
-
-              {candidate.decision_owner && (
-                <Text size="small">
-                  Responsable: {candidate.decision_owner}
-                </Text>
-              )}
-
-              {candidate.meeting_date && (
-                <Text size="small">
-                  Fecha: {formatDate(candidate.meeting_date)}
-                </Text>
-              )}
-
-            </Inline>
-          </Box>
-
-          
-          {/* ORIGEN DE LA DECISIÓN */}
-
-          {(candidate.source_reference ||
-            candidate.source_file) && (
-            <Box
-              padding="space.150"
-              backgroundColor="elevation.surface.raised"
-              borderRadius="medium"
-            >
-              <Stack space="space.050">
-                <Text weight="semibold" size="small">
-                  Origen de la minuta
-                </Text>
-
-                <Text size="small">
-                  {candidate.source_reference ||
-                    candidate.source_file}
-                </Text>
-              </Stack>
-            </Box>
-          )}
-
-
-          {/* ================================================ */}
-          {/* RESUMEN */}
-          {/* ================================================ */}
-
-          {!expanded && (
-            <Stack space="space.100">
-
-              <Text weight="semibold">
-                Resumen de la decisión
-              </Text>
-
-              <Text>
-                {candidate.decision
-                  ? candidate.decision.length > 200
-                    ? `${candidate.decision.slice(0, 200)}...`
-                    : candidate.decision
-                  : 'Sin descripción'}
-              </Text>
-
-            </Stack>
-          )}
-
-          {/* ================================================ */}
-          {/* ACCIONES PRINCIPALES */}
-          {/* ================================================ */}
-
-          <Inline
-            space="space.100"
-            alignBlock="center"
-            shouldWrap
-          >
-
-            {/* AZUL - VER DETALLES */}
-
-            <Button
-              appearance="primary"
-              onClick={() => {
-                setExpandedId(
-                  expanded ? null : candidate.id
-                );
-
-                if (expanded) {
-                  setEditingId(null);
-                  setConfirmDeleteId(null);
-                }
-              }}
-            >
-              {expanded
-                ? 'Ocultar detalles'
-                : 'Ver detalles'}
-            </Button>
-
-            {/* VERDE - VALIDAR */}
-
-            {!archived && !isValidated && (
-              <Box
-                backgroundColor="color.background.success"
-                borderRadius="medium"
-              >
-                <Button
-                  appearance="subtle"
-                  isDisabled={busy}
-                  onClick={() =>
-                    handleReview(
-                      candidate.id,
-                      'Validado'
-                    )
-                  }
-                >
-                  Validar
-                </Button>
-              </Box>
-            )}
-
-            {/* AMARILLO - DESCARTAR */}
-
-            {!archived && !isDiscarded && (
-              <Box
-                backgroundColor="color.background.warning"
-                borderRadius="medium"
-              >
-                <Button
-                  appearance="subtle"
-                  isDisabled={busy}
-                  onClick={() =>
-                    handleReview(
-                      candidate.id,
-                      'Descartado'
-                    )
-                  }
-                >
-                  Descartar
-                </Button>
-              </Box>
-            )}
-
-          </Inline>
-
-          {/* ================================================ */}
-          {/* CONTENIDO EXPANDIDO */}
-          {/* ================================================ */}
-
-          {expanded && (
-            <Stack space="space.300">
-
-              {editing ? (
-
-                <Box
-                  padding="space.300"
-                  backgroundColor="elevation.surface.raised"
-                  borderRadius="medium"
-                >
-                  {renderEditForm()}
-                </Box>
-
-              ) : (
-
-                <Stack space="space.300">
-
-                  {/* DECISIÓN */}
-
-                  <Box
-                    padding="space.300"
-                    backgroundColor="elevation.surface.raised"
-                    borderRadius="medium"
-                  >
-                    <Stack space="space.100">
-
-                      <Heading size="small">
-                        Decisión
-                      </Heading>
-
-                      <Text>
-                        {candidate.decision ||
-                          'Sin descripción'}
-                      </Text>
-
-                    </Stack>
-                  </Box>
-
-                  {/* CONTEXTO */}
-
-                  {candidate.context && (
-                    <Box
-                      padding="space.300"
-                      backgroundColor="elevation.surface.raised"
-                      borderRadius="medium"
-                    >
-                      <Stack space="space.100">
-
-                        <Heading size="small">
-                          Contexto
-                        </Heading>
-
-                        <Text>
-                          {candidate.context}
-                        </Text>
-
-                      </Stack>
-                    </Box>
-                  )}
-
-                  {/* ORIGEN */}
-
-                  {(candidate.source_file ||
-                    candidate.source_reference) && (
-                    <Box
-                      padding="space.200"
-                      backgroundColor="elevation.surface.raised"
-                      borderRadius="medium"
-                    >
-                      <Stack space="space.050">
-
-                        <Text weight="semibold">
-                          Origen
-                        </Text>
-
-                        <Text size="small">
-                          {candidate.source_file ||
-                            candidate.source_reference}
-                        </Text>
-
-                      </Stack>
-                    </Box>
-                  )}
-
-                  {/* ====================================== */}
-                  {/* ACCIONES SECUNDARIAS */}
-                  {/* ====================================== */}
-
-                  <Inline
-                    space="space.100"
-                    alignBlock="center"
-                    shouldWrap
-                  >
-
-                    {!archived ? (
-                      <>
-
-                        {/* EDITAR - AZUL */}
-
-                        <Box
-                          backgroundColor="color.background.information"
-                          borderRadius="medium"
-                        >
-                          <Button
-                            appearance="subtle"
-                            isDisabled={busy}
-                            onClick={() =>
-                              handleStartEdit(candidate)
-                            }
-                          >
-                            Editar
-                          </Button>
-                        </Box>
-
-                        {/* ARCHIVAR - GRIS */}
-
-                        <Box
-                          backgroundColor="color.background.neutral"
-                          borderRadius="medium"
-                        >
-                          <Button
-                            appearance="subtle"
-                            isDisabled={busy}
-                            onClick={() =>
-                              handleAction(
-                                'archiveCandidate',
-                                candidate.id,
-                                'Candidato archivado.'
-                              )
-                            }
-                          >
-                            Archivar
-                          </Button>
-                        </Box>
-
-                      </>
-                    ) : (
-
-                      /* RESTAURAR - VERDE */
-
-                      <Box
-                        backgroundColor="color.background.success"
-                        borderRadius="medium"
-                      >
-                        <Button
-                          appearance="subtle"
-                          isDisabled={busy}
-                          onClick={() =>
-                            handleAction(
-                              'restoreCandidate',
-                              candidate.id,
-                              'Candidato restaurado.'
-                            )
-                          }
-                        >
-                          Restaurar
-                        </Button>
-                      </Box>
-
-                    )}
-
-                  </Inline>
-
-                  {/* ====================================== */}
-                  {/* ELIMINACIÓN */}
-                  {/* ====================================== */}
-
-                  {confirmDeleteId === candidate.id ? (
-
-                    <Box
-                      padding="space.300"
-                      backgroundColor="color.background.danger"
-                      borderRadius="medium"
-                    >
-                      <Stack space="space.200">
-
-                        <Text weight="semibold">
-                          Confirmar eliminación
-                        </Text>
-
-                        <Text>
-                          Esta decisión será eliminada
-                          permanentemente de la base de datos.
-                          Esta acción no se puede deshacer.
-                        </Text>
-
-                        <Inline
-                          space="space.100"
-                          shouldWrap
-                        >
-
-                          <Button
-                            appearance="danger"
-                            isDisabled={busy}
-                            onClick={() =>
-                              handleAction(
-                                'deleteCandidate',
-                                candidate.id,
-                                'Candidato eliminado.'
-                              )
-                            }
-                          >
-                            Eliminar definitivamente
-                          </Button>
-
-                          <Button
-                            appearance="default"
-                            onClick={() =>
-                              setConfirmDeleteId(null)
-                            }
-                          >
-                            Cancelar
-                          </Button>
-
-                        </Inline>
-
-                      </Stack>
-                    </Box>
-
-                  ) : (
-
-                    <Inline space="space.100">
-
-                      {/* ELIMINAR - ROJO */}
-
-                      <Button
-                        appearance="danger"
-                        isDisabled={busy}
-                        onClick={() =>
-                          setConfirmDeleteId(candidate.id)
-                        }
-                      >
-                        Eliminar
-                      </Button>
-
-                    </Inline>
-
-                  )}
-
-                </Stack>
-
-              )}
-
-            </Stack>
-          )}
-
-        </Stack>
-      </Box>
+      <Inline space="space.050" alignBlock="center">
+        <LoadingButton
+          spacing="compact"
+          iconBefore="check"
+          isLoading={busy === REVIEW.validated}
+          isDisabled={Boolean(busy) || review === REVIEW.validated}
+          onClick={() => setReview(d, REVIEW.validated)}
+        >
+          Validar
+        </LoadingButton>
+        <LoadingButton
+          spacing="compact"
+          appearance="subtle"
+          iconBefore="cross"
+          isLoading={busy === REVIEW.discarded}
+          isDisabled={Boolean(busy) || review === REVIEW.discarded}
+          onClick={() => setReview(d, REVIEW.discarded)}
+        >
+          Descartar
+        </LoadingButton>
+        {/* Después de los botones, para no desplazarlos bajo el cursor. */}
+        {!showReview && keep.has(d.id) && (
+          <Lozenge appearance={reviewAppearance(review)}>
+            {review === REVIEW.validated ? 'Validada' : review === REVIEW.discarded ? 'Descartada' : 'Pendiente'}
+          </Lozenge>
+        )}
+      </Inline>
     );
   };
 
-  // ==========================================================
-  // VISTA: DECISIONES
-  // ==========================================================
+  const rows = visible.map((d) => ({
+    key: d.id,
+    isHighlighted: selected.has(d.id),
+    cells: [
+      {
+        key: 'select',
+        content: (
+          <Checkbox
+            isChecked={selected.has(d.id)}
+            onChange={() => setSelected((s) => toggleId(s, d.id))}
+          />
+        ),
+      },
+      {
+        key: (d.title || '').toLowerCase(),
+        content: (
+          <Pressable
+            onClick={() => setDetailId(d.id)}
+            backgroundColor="color.background.neutral.subtle"
+            padding="space.0"
+            xcss={titleStyle}
+          >
+            <Stack space="space.025">
+              <Text weight="semibold" color="color.link" maxLines={2}>{d.title || 'Sin título'}</Text>
+              {subtitle(d) ? <Text size="small" color="color.text.subtlest">{subtitle(d)}</Text> : null}
+            </Stack>
+          </Pressable>
+        ),
+      },
+      { key: (d.decision_owner || '').toLowerCase(), content: <Text maxLines={2}>{d.decision_owner || '—'}</Text> },
+      ...(showReview
+        ? [{
+          key: 'review',
+          content: (
+            <Lozenge appearance={reviewAppearance(d.review_status)}>
+              {d.review_status || REVIEW.pending}
+            </Lozenge>
+          ),
+        }]
+        : []),
+      { key: 'actions', content: rowActions(d) },
+    ],
+  }));
 
-  const renderDecisions = () => (
-    <Stack space="space.300">
+  // ============================================================
+  // BLOQUES DE PANTALLA
+  // ============================================================
 
-      <Inline
-        space="space.200"
-        alignBlock="center"
-        shouldWrap
-      >
-        <Heading size="medium">
-          Decisiones arquitectónicas
-        </Heading>
-
-        <Button
-          appearance="subtle"
-          isDisabled={busy}
-          onClick={refreshCandidates}
-        >
-          Actualizar
+  const toolbar = (
+    <Inline space="space.100" alignBlock="center" spread="space-between" shouldWrap>
+      <Inline space="space.100" shouldWrap>
+        <LoadingButton appearance="primary" iconBefore="refresh" isLoading={syncing} onClick={() => syncDrive(false)}>
+          {savedFolder || googleLoading ? 'Sincronizar Drive' : 'Conectar Drive'}
+        </LoadingButton>
+        <Button iconBefore="upload" onClick={() => { setImportResult(null); setShowImport(true); }}>
+          Importar minuta
+        </Button>
+        <Button iconBefore="add" onClick={() => setShowCreate(true)}>
+          Nueva decisión
         </Button>
       </Inline>
-
-      {/* INDICADORES */}
-
-      <Inline space="space.200" shouldWrap>
-        <Lozenge appearance="default">
-          Total: {candidates.length}
-        </Lozenge>
-
-        <Lozenge appearance="inprogress">
-          Pendientes: {pendingCount}
-        </Lozenge>
-
-        <Lozenge appearance="success">
-          Validadas: {validatedCount}
-        </Lozenge>
-
-        <Lozenge appearance="removed">
-          Descartadas: {discardedCount}
-        </Lozenge>
-      </Inline>
-
-      {/* ACTIVAS / ARCHIVADAS */}
-
-      <Inline space="space.100">
-        <Button
-          appearance={
-            activeView === 'active' ? 'primary' : 'default'
-          }
-          onClick={() => {
-            setActiveView('active');
-            setCurrentPage(1);
-            setExpandedId(null);
-            setEditingId(null);
-          }}
+      <Inline space="space.100" shouldWrap>
+        <LoadingButton
+          iconBefore="download"
+          isLoading={exporting}
+          isDisabled={visible.length === 0}
+          onClick={() => exportExcel(visible, tab.id)}
         >
-          Activas ({candidates.length})
-        </Button>
-
-        <Button
-          appearance={
-            activeView === 'archived' ? 'primary' : 'default'
-          }
-          onClick={() => {
-            setActiveView('archived');
-            setCurrentPage(1);
-            setExpandedId(null);
-            setEditingId(null);
-          }}
-        >
-          Archivadas ({archivedCandidates.length})
+          Exportar Excel
+        </LoadingButton>
+        <Button appearance="subtle" iconBefore="settings" onClick={openSettings}>
+          Configuración
         </Button>
       </Inline>
+    </Inline>
+  );
 
-      {/* FILTRO */}
-
-      <Stack space="space.050">
-        <Text weight="semibold">Estado de revisión</Text>
-        <Select
-          options={FILTERS}
-          value={
-            FILTERS.find((o) => o.value === reviewFilter) ||
-            FILTERS[0]
-          }
-          onChange={(option) => {
-            setReviewFilter(option?.value || 'all');
-            setCurrentPage(1);
-          }}
-        />
-      </Stack>
-
-      {/* LISTADO */}
-
-      {loading ? (
-        <Spinner size="medium" />
-      ) : visibleCandidates.length === 0 ? (
-        <SectionMessage appearance="information">
-          <Text>
-            No hay decisiones que coincidan con este filtro.
-          </Text>
-        </SectionMessage>
-      ) : (
-        <Stack space="space.200">
-          {visibleCandidates.map(renderCandidate)}
-        </Stack>
+  const selectionBar = (
+    <Inline space="space.200" alignBlock="center" shouldWrap>
+      <Checkbox
+        label={selected.size > 0 ? plural(selected.size, 'seleccionada', 'seleccionadas') : `Seleccionar todas (${visible.length})`}
+        isChecked={allSelected}
+        isIndeterminate={someSelected}
+        isDisabled={visible.length === 0}
+        onChange={() => setSelected((s) => toggleAll(s, visibleIds))}
+      />
+      {selected.size > 0 && (
+        <Inline space="space.100" shouldWrap>
+          {!isArchivedTab && (
+            <LoadingButton
+              spacing="compact"
+              iconBefore="archive"
+              isLoading={bulkBusy === 'archive'}
+              isDisabled={Boolean(bulkBusy)}
+              onClick={() => archiveIds(selectedIds)}
+            >
+              Archivar
+            </LoadingButton>
+          )}
+          <Button
+            spacing="compact"
+            iconBefore="trash"
+            isDisabled={Boolean(bulkBusy)}
+            onClick={() => setConfirmDelete({ ids: selectedIds })}
+          >
+            Eliminar
+          </Button>
+          <LoadingButton
+            spacing="compact"
+            iconBefore="download"
+            isLoading={exporting}
+            onClick={() => exportExcel(visible.filter((d) => selected.has(d.id)), 'seleccion')}
+          >
+            Exportar selección
+          </LoadingButton>
+          <Button spacing="compact" appearance="subtle" onClick={() => setSelected(new Set())}>
+            Quitar selección
+          </Button>
+        </Inline>
       )}
+    </Inline>
+  );
 
-      {/* PAGINACIÓN */}
+  const isEmptyApp = !loading && active.length === 0 && archived.length === 0;
 
-      <Inline
-        space="space.200"
-        alignBlock="center"
-        shouldWrap
-      >
-        <Button
-          isDisabled={safePage <= 1}
-          onClick={() => setCurrentPage(safePage - 1)}
-        >
-          Anterior
+  const tablePanel = isEmptyApp ? (
+    <EmptyState
+      header="Aún no hay decisiones en este espacio"
+      description="Sincroniza la carpeta de minutas en Google Drive o importa un archivo Markdown para extraer decisiones."
+      primaryAction={
+        <Button appearance="primary" onClick={() => syncDrive(false)}>
+          {savedFolder || googleLoading ? 'Sincronizar Drive' : 'Conectar Drive'}
         </Button>
-
-        <Text>
-          Página {safePage} de {totalPages}
-        </Text>
-
-        <Button
-          isDisabled={safePage >= totalPages}
-          onClick={() => setCurrentPage(safePage + 1)}
-        >
-          Siguiente
-        </Button>
-      </Inline>
-
-      <Text size="small">
-        Mostrando {visibleCandidates.length} de{' '}
-        {filteredCandidates.length} decisiones.
-      </Text>
-
+      }
+      secondaryAction={<Button onClick={() => setShowImport(true)}>Importar minuta</Button>}
+    />
+  ) : (
+    <Stack space="space.200">
+      <Textfield
+        value={query}
+        placeholder="Buscar por título, proyecto, responsable o texto de la decisión"
+        onChange={(e) => changeQuery(e.target.value)}
+      />
+      {selectionBar}
+      <DynamicTable
+        head={head}
+        rows={rows}
+        rowsPerPage={PAGE_SIZE}
+        isFixedSize
+        isLoading={loading}
+        emptyView={<Text>{query ? 'Ninguna decisión coincide con la búsqueda.' : 'No hay decisiones en esta vista.'}</Text>}
+      />
     </Stack>
   );
 
-  // ==========================================================
-  // VISTA: INCORPORAR
-  // ==========================================================
+  // ============================================================
+  // MODALES
+  // ============================================================
 
-  const renderImport = () => (
-    <Stack space="space.400">
-
-      <Heading size="medium">
-        Incorporar decisiones
-      </Heading>
-
-      <Text>
-        Importa una minuta Markdown o registra una decisión
-        manualmente.
-      </Text>
-
-      {/* IMPORTACIÓN */}
-
-      <Box
-        padding="space.300"
-        backgroundColor="elevation.surface.raised"
-        borderRadius="medium"
-      >
-        <Stack space="space.200">
-
-          <Heading size="small">
-            Importar minuta Markdown
-          </Heading>
-
-          <Text>
-            Selecciona un archivo .md para extraer
-            automáticamente candidatos ADR.
-          </Text>
-
-          <FilePicker
-            onChange={handleFileChange}
-            accept=".md,text/markdown,text/plain"
-          />
-
-          {selectedFile && (
-            <Text size="small">
-              {selectedFile.name || 'Archivo seleccionado'}
-            </Text>
-          )}
-
-          <Inline space="space.100">
-            <Button
-              appearance="primary"
-              isDisabled={!selectedFile || busy}
-              onClick={handleImport}
-            >
-              Procesar minuta
-            </Button>
-          </Inline>
-
-          {importResult && (
-            <SectionMessage appearance="success">
-              <Stack space="space.050">
-                <Text>Minuta procesada correctamente.</Text>
-                <Text>
-                  Candidatos: {importResult.total_candidates}
-                </Text>
-                <Text>
-                  Nuevos: {importResult.inserted}
-                </Text>
-                <Text>
-                  Duplicados: {importResult.duplicates}
-                </Text>
+  const detailModal = detail && (
+    <Modal onClose={closeDetail} width="large">
+      <ModalHeader>
+        <ModalTitle>{editForm ? 'Editar decisión' : detail.title || 'Sin título'}</ModalTitle>
+      </ModalHeader>
+      <ModalBody>
+        {editForm ? (
+          <Stack space="space.200">
+            <Field label="Título" required value={editForm.title} onChange={(v) => setEditForm((f) => ({ ...f, title: v }))} />
+            <Field label="Decisión" required multiline value={editForm.decision} onChange={(v) => setEditForm((f) => ({ ...f, decision: v }))} />
+            <Field label="Contexto" multiline value={editForm.context} onChange={(v) => setEditForm((f) => ({ ...f, context: v }))} />
+            <Inline space="space.200" grow="fill">
+              <Field label="Proyecto" value={editForm.job} onChange={(v) => setEditForm((f) => ({ ...f, job: v }))} />
+              <Field label="Responsable" value={editForm.decision_owner} onChange={(v) => setEditForm((f) => ({ ...f, decision_owner: v }))} />
+            </Inline>
+            <Inline space="space.200" grow="fill">
+              <SelectField label="Estado de la decisión" options={DECISION_STATUSES} value={editForm.status} onChange={(v) => setEditForm((f) => ({ ...f, status: v }))} />
+              <SelectField label="Revisión" options={REVIEW_OPTIONS} value={editForm.review_status} onChange={(v) => setEditForm((f) => ({ ...f, review_status: v }))} />
+            </Inline>
+          </Stack>
+        ) : (
+          <Stack space="space.300">
+            <Inline space="space.100" shouldWrap>
+              <Lozenge appearance={reviewAppearance(detail.review_status)}>{`Revisión: ${detail.review_status || REVIEW.pending}`}</Lozenge>
+              <Lozenge appearance={decisionAppearance(detail.status)}>{`Estado: ${detail.status || 'Propuesto'}`}</Lozenge>
+              {detail.archived_at && <Lozenge>Archivada</Lozenge>}
+            </Inline>
+            <Inline space="space.400" shouldWrap>
+              <Meta label="Proyecto" value={detail.job} />
+              <Meta label="Responsable" value={detail.decision_owner} />
+              <Meta label="Fecha de reunión" value={formatDate(detail.meeting_date)} />
+            </Inline>
+            <Stack space="space.075">
+              <Heading size="xsmall">Decisión</Heading>
+              <Text>{detail.decision || 'Sin descripción'}</Text>
+            </Stack>
+            {detail.context && detail.context !== detail.decision && (
+              <Stack space="space.075">
+                <Heading size="xsmall">Contexto</Heading>
+                <Text>{detail.context}</Text>
               </Stack>
+            )}
+            <Meta label="Minuta de origen" value={detail.source_reference || detail.source_file} />
+          </Stack>
+        )}
+      </ModalBody>
+      <ModalFooter>
+        {editForm ? (
+          <Inline space="space.100">
+            <Button appearance="subtle" onClick={() => setEditForm(null)}>Cancelar</Button>
+            <LoadingButton
+              appearance="primary"
+              isLoading={savingEdit}
+              isDisabled={!editForm.title.trim() || !editForm.decision.trim()}
+              onClick={saveEdit}
+            >
+              Guardar cambios
+            </LoadingButton>
+          </Inline>
+        ) : (
+          <Inline space="space.100" shouldWrap>
+            <Button appearance="subtle" iconBefore="trash" onClick={() => setConfirmDelete({ ids: [detail.id] })}>
+              Eliminar
+            </Button>
+            {detail.archived_at ? (
+              <LoadingButton iconBefore="undo" isLoading={rowBusy[detail.id] === 'restore'} onClick={async () => { await restore(detail); closeDetail(); }}>
+                Restaurar
+              </LoadingButton>
+            ) : (
+              <>
+                <LoadingButton iconBefore="archive" isLoading={bulkBusy === 'archive'} onClick={() => archiveIds([detail.id])}>
+                  Archivar
+                </LoadingButton>
+                <Button iconBefore="edit" onClick={() => startEdit(detail)}>Editar</Button>
+              </>
+            )}
+            <Button appearance="primary" onClick={closeDetail}>Cerrar</Button>
+          </Inline>
+        )}
+      </ModalFooter>
+    </Modal>
+  );
+
+  const confirmModal = confirmDelete && (
+    <Modal onClose={() => setConfirmDelete(null)} width="small">
+      <ModalHeader>
+        <ModalTitle appearance="danger">
+          {`¿Eliminar ${plural(confirmDelete.ids.length, 'decisión', 'decisiones')}?`}
+        </ModalTitle>
+      </ModalHeader>
+      <ModalBody>
+        <Text>
+          Se borran definitivamente de Minerva. Las que vienen de Google Drive se pueden recuperar con
+          «Releer todas las minutas» en Configuración.
+        </Text>
+      </ModalBody>
+      <ModalFooter>
+        <Button appearance="subtle" onClick={() => setConfirmDelete(null)}>Cancelar</Button>
+        <LoadingButton appearance="danger" isLoading={bulkBusy === 'delete'} onClick={() => deleteIds(confirmDelete.ids)}>
+          Eliminar
+        </LoadingButton>
+      </ModalFooter>
+    </Modal>
+  );
+
+  const importModal = showImport && (
+    <Modal onClose={() => setShowImport(false)}>
+      <ModalHeader>
+        <ModalTitle>Importar minuta Markdown</ModalTitle>
+      </ModalHeader>
+      <ModalBody>
+        <Stack space="space.200">
+          <Text>Sube un archivo .md y Minerva extraerá las decisiones que encuentre.</Text>
+          <FilePicker accept=".md,text/markdown,text/plain" onChange={(f) => { setSelectedFile(f); setImportResult(null); }} />
+          {importResult && (
+            <SectionMessage appearance="success" title="Minuta procesada">
+              <Text>
+                {`${plural(importResult.inserted, 'decisión nueva', 'decisiones nuevas')} · ${plural(importResult.duplicates, 'ya existía', 'ya existían')}`}
+              </Text>
             </SectionMessage>
           )}
-
         </Stack>
-      </Box>
-
-      {/* CREACIÓN MANUAL */}
-
-      <Box
-        padding="space.300"
-        backgroundColor="elevation.surface.raised"
-        borderRadius="medium"
-      >
-        <Stack space="space.200">
-
-          <Heading size="small">
-            Crear candidato manual
-          </Heading>
-
-          <Field
-            label="Título"
-            value={manualForm.title}
-            onChange={(value) =>
-              setManualForm((p) => ({ ...p, title: value }))
-            }
-          />
-
-          <Field
-            label="Decisión"
-            multiline
-            value={manualForm.decision}
-            onChange={(value) =>
-              setManualForm((p) => ({ ...p, decision: value }))
-            }
-          />
-
-          <Field
-            label="Contexto"
-            multiline
-            value={manualForm.context}
-            onChange={(value) =>
-              setManualForm((p) => ({ ...p, context: value }))
-            }
-          />
-
-          <Field
-            label="Proyecto"
-            value={manualForm.job}
-            onChange={(value) =>
-              setManualForm((p) => ({ ...p, job: value }))
-            }
-          />
-
-          <Field
-            label="Responsable"
-            value={manualForm.decision_owner}
-            onChange={(value) =>
-              setManualForm((p) => ({
-                ...p,
-                decision_owner: value,
-              }))
-            }
-          />
-
-          <Field
-            label="Fecha (YYYY-MM-DD)"
-            value={manualForm.meeting_date}
-            onChange={(value) =>
-              setManualForm((p) => ({
-                ...p,
-                meeting_date: value,
-              }))
-            }
-          />
-
-          <Field
-            label="Referencia de origen"
-            value={manualForm.source_reference}
-            onChange={(value) =>
-              setManualForm((p) => ({
-                ...p,
-                source_reference: value,
-              }))
-            }
-          />
-
-          <Inline space="space.100">
-            <Button
-              appearance="primary"
-              isDisabled={busy}
-              onClick={handleCreateManual}
-            >
-              Crear candidato
-            </Button>
-
-            <Button
-              appearance="subtle"
-              onClick={() => setManualForm(EMPTY_FORM)}
-            >
-              Limpiar formulario
-            </Button>
-          </Inline>
-
-        </Stack>
-      </Box>
-
-    </Stack>
+      </ModalBody>
+      <ModalFooter>
+        <Button appearance="subtle" onClick={() => setShowImport(false)}>Cerrar</Button>
+        <LoadingButton appearance="primary" isLoading={importing} isDisabled={!selectedFile} onClick={handleImport}>
+          Procesar minuta
+        </LoadingButton>
+      </ModalFooter>
+    </Modal>
   );
 
-  // ==========================================================
-  // VISTA: CONFIGURACIÓN
-  // ==========================================================
+  const setManual = (key) => (value) => setManualForm((f) => ({ ...f, [key]: value }));
 
-  const renderSettings = () => (
-    <Stack space="space.300">
+  const createModal = showCreate && (
+    <Modal onClose={() => setShowCreate(false)} width="large">
+      <ModalHeader>
+        <ModalTitle>Nueva decisión</ModalTitle>
+      </ModalHeader>
+      <ModalBody>
+        <Stack space="space.200">
+          <Field label="Título" required value={manualForm.title} onChange={setManual('title')} placeholder="Ej.: Usar scratch temporal en nodos de cómputo" />
+          <Field label="Decisión" required multiline value={manualForm.decision} onChange={setManual('decision')} />
+          <Field label="Contexto" multiline value={manualForm.context} onChange={setManual('context')} placeholder="Por qué se tomó, alternativas, restricciones" />
+          <Inline space="space.200" grow="fill">
+            <Field label="Proyecto" value={manualForm.job} onChange={setManual('job')} />
+            <Field label="Responsable" value={manualForm.decision_owner} onChange={setManual('decision_owner')} />
+          </Inline>
+          <Inline space="space.200" grow="fill">
+            <Stack space="space.050">
+              <Text weight="semibold">Fecha de reunión</Text>
+              <DatePicker
+                value={manualForm.meeting_date}
+                locale="es-CL"
+                placeholder="Selecciona una fecha"
+                onChange={(value) => setManual('meeting_date')(value || '')}
+              />
+            </Stack>
+            <Field label="Referencia de origen" value={manualForm.source_reference} onChange={setManual('source_reference')} placeholder="Minuta, acta o enlace" />
+          </Inline>
+        </Stack>
+      </ModalBody>
+      <ModalFooter>
+        <Button appearance="subtle" onClick={() => setShowCreate(false)}>Cancelar</Button>
+        <LoadingButton
+          appearance="primary"
+          isLoading={creating}
+          isDisabled={!manualForm.title.trim() || !manualForm.decision.trim()}
+          onClick={handleCreate}
+        >
+          Crear decisión
+        </LoadingButton>
+      </ModalFooter>
+    </Modal>
+  );
 
-      <Heading size="medium">
-        Configuración
-      </Heading>
+  const folderButton = (folder) => (
+    <Button
+      key={folder.id}
+      iconBefore="folder"
+      isSelected={candidateFolder?.id === folder.id}
+      onClick={() => previewFolder(folder)}
+    >
+      {folder.name}
+    </Button>
+  );
 
-      <Box
-        padding="space.300"
-        backgroundColor="elevation.surface.raised"
-        borderRadius="medium"
-      >
-        <Stack space="space.300">
-
-          <Heading size="small">
-            Fuente de minutas
-          </Heading>
-
-          {googleLoading || driveConfigLoading ? (
-            <Inline space="space.100" alignBlock="center">
-              <Spinner size="small" />
-              <Text>Cargando configuración...</Text>
-            </Inline>
-          ) : (
-            <Stack space="space.200">
-
-              {/* ESTADO DE CONEXIÓN */}
-
-              <Inline
-                space="space.100"
-                alignBlock="center"
-                shouldWrap
-              >
-                <Lozenge
-                  appearance={
-                    googleAccount ? 'success' : 'default'
-                  }
-                >
-                  {googleAccount
-                    ? 'Conectado'
-                    : 'Desconectado'}
-                </Lozenge>
-
-                <Text>
-                  {googleAccount?.displayName ||
-                    'Google Drive'}
-                </Text>
-              </Inline>
-
-              {!googleAccount ? (
-                <Button
-                  appearance="primary"
-                  isDisabled={googleConnecting}
-                  onClick={handleConnectGoogle}
-                >
-                  {googleConnecting
-                    ? 'Conectando...'
-                    : 'Conectar Google Drive'}
-                </Button>
+  const settingsModal = showSettings && (
+    <Modal onClose={() => setShowSettings(false)} width="large">
+      <ModalHeader>
+        <ModalTitle>Configuración de minutas</ModalTitle>
+      </ModalHeader>
+      <ModalBody>
+        {googleLoading ? (
+          <Inline space="space.100" alignBlock="center"><Spinner size="small" /><Text>Cargando…</Text></Inline>
+        ) : (
+          <Stack space="space.300">
+            <Stack space="space.100">
+              <Heading size="xsmall">Cuenta de Google Drive</Heading>
+              {googleAccount ? (
+                <Inline space="space.100" alignBlock="center">
+                  <Lozenge appearance="success">Conectada</Lozenge>
+                  <Text>{googleAccount.displayName}</Text>
+                </Inline>
               ) : (
-                <Stack space="space.200">
+                <Inline space="space.100" alignBlock="center">
+                  <LoadingButton appearance="primary" iconBefore="googledrive" isLoading={googleConnecting} onClick={connectGoogle}>
+                    Conectar Google Drive
+                  </LoadingButton>
+                  <Text size="small" color="color.text.subtle">Sólo lectura. Cada persona conecta su propia cuenta.</Text>
+                </Inline>
+              )}
+            </Stack>
 
-                  {/* CARPETA CONFIGURADA */}
+            {googleAccount && (
+              <Stack space="space.150">
+                <Heading size="xsmall">Carpeta de minutas</Heading>
+                <Text>
+                  {savedFolder ? `Carpeta actual: ${savedFolder.name}` : 'Todavía no hay una carpeta configurada.'}
+                </Text>
+                {preferredLoading ? (
+                  <Spinner size="small" />
+                ) : (
+                  preferredFolders.length > 0 && (
+                    <Inline space="space.100" shouldWrap>{preferredFolders.map(folderButton)}</Inline>
+                  )
+                )}
+                <Inline space="space.100" alignBlock="center">
+                  <Textfield
+                    value={driveQuery}
+                    placeholder="Buscar otra carpeta por nombre"
+                    onChange={(e) => setDriveQuery(e.target.value)}
+                  />
+                  <LoadingButton isLoading={driveSearching} isDisabled={driveQuery.trim().length < 2} onClick={searchFolders}>
+                    Buscar
+                  </LoadingButton>
+                </Inline>
+                {driveMatches.length > 0 && <Inline space="space.100" shouldWrap>{driveMatches.map(folderButton)}</Inline>}
 
-                  <Box
-                    padding="space.200"
-                    backgroundColor="elevation.surface.sunken"
-                    borderRadius="medium"
-                  >
+                {candidateFolder && (
+                  <Box padding="space.200" backgroundColor="color.background.neutral" borderRadius="medium">
                     <Stack space="space.100">
-                      <Text weight="semibold">
-                        Carpeta activa
-                      </Text>
-
-                      {savedDriveFolder ? (
-                        <Inline
-                          space="space.100"
-                          alignBlock="center"
-                        >
-                          <Lozenge appearance="success">
-                            Guardada
-                          </Lozenge>
-
-                          <Text>{savedDriveFolder.name}</Text>
-                        </Inline>
+                      <Text weight="semibold">{candidateFolder.name}</Text>
+                      {previewLoading ? (
+                        <Inline space="space.100"><Spinner size="small" /><Text>Explorando archivos…</Text></Inline>
                       ) : (
-                        <Text>
-                          No hay una carpeta configurada.
-                        </Text>
+                        folderPreview && (
+                          <Text>
+                            {`${plural(folderPreview.totalMarkdown, 'minuta Markdown', 'minutas Markdown')} en ${plural(folderPreview.foldersScanned, 'carpeta', 'carpetas')}${folderPreview.truncated ? ' (exploración parcial)' : ''}`}
+                          </Text>
+                        )
                       )}
+                      <Inline space="space.100">
+                        <LoadingButton
+                          appearance="primary"
+                          isLoading={folderSaving}
+                          isDisabled={!folderPreview || candidateFolder.id === savedFolder?.id}
+                          onClick={saveFolder}
+                        >
+                          {candidateFolder.id === savedFolder?.id ? 'Ya es la carpeta actual' : 'Usar esta carpeta'}
+                        </LoadingButton>
+                      </Inline>
                     </Stack>
                   </Box>
+                )}
+              </Stack>
+            )}
 
-                  <Inline space="space.100">
-                    <Button
-                      appearance="subtle"
-                      onClick={handleToggleDriveSettings}
-                    >
-                      {showDriveSettings
-                        ? 'Ocultar configuración'
-                        : 'Cambiar carpeta'}
-                    </Button>
-                  </Inline>
+            {savedFolder && (
+              <Stack space="space.100">
+                <Heading size="xsmall">Releer todas las minutas</Heading>
+                <Text size="small" color="color.text.subtle">
+                  Vuelve a procesar también las minutas sin cambios. Sirve para recuperar decisiones eliminadas;
+                  las que ya existen no se duplican.
+                </Text>
+                <Inline>
+                  <LoadingButton iconBefore="retry" isLoading={syncing} onClick={() => syncDrive(true)}>
+                    Releer todas las minutas
+                  </LoadingButton>
+                </Inline>
+              </Stack>
+            )}
 
-
-                    {/* ================================================ */}
-                    {/* SINCRONIZACIÓN DE MINUTAS */}
-                    {/* ================================================ */}
-
-                    <Box
-                      padding="space.300"
-                      backgroundColor="color.background.neutral"
-                      borderRadius="medium"
-                    >
-                      <Stack space="space.200">
-
-                        <Heading size="small">
-                          Sincronización de minutas
-                        </Heading>
-
-                        <Text>
-                          Importa los archivos Markdown nuevos o
-                          modificados de la carpeta configurada.
-                        </Text>
-
-                        <Inline
-                          space="space.100"
-                          alignBlock="center"
-                          shouldWrap
-                        >
-                          <Button
-                            appearance="primary"
-                            isDisabled={
-                              syncLoading ||
-                              !savedDriveFolder ||
-                              driveSaving
-                            }
-                            onClick={() => handleSyncDrive(false)}
-                          >
-                            {syncLoading
-                              ? 'Sincronizando...'
-                              : 'Sincronizar ahora'}
-                          </Button>
-
-                          <Button
-                            appearance="default"
-                            isDisabled={
-                              syncLoading ||
-                              !savedDriveFolder ||
-                              driveSaving
-                            }
-                            onClick={() => handleSyncDrive(true)}
-                          >
-                            Reprocesar archivos
-                          </Button>
-
-                          {syncLoading && (
-                            <Spinner size="small" />
-                          )}
-                        </Inline>
-
-                        {syncLoading && (
-                          <Text size="small">
-                            Revisando carpetas, descargando minutas
-                            y extrayendo decisiones...
-                          </Text>
-                        )}
-
-                        {/* RESULTADO */}
-
-                        {syncResult && (
-                          <SectionMessage
-                            appearance={
-                              syncResult.errors?.length > 0
-                                ? 'warning'
-                                : 'success'
-                            }
-                          >
-                            <Stack space="space.150">
-
-                              <Text weight="semibold">
-                                Sincronización finalizada
-                              </Text>
-
-                              <Text>
-                                Carpeta: {syncResult.folder}
-                              </Text>
-
-                              <Inline space="space.100" shouldWrap>
-                                <Lozenge appearance="default">
-                                  Carpetas: {syncResult.foldersScanned}
-                                </Lozenge>
-
-                                <Lozenge appearance="default">
-                                  Procesados: {syncResult.filesProcessed}
-                                </Lozenge>
-
-                                <Lozenge appearance="success">
-                                  Nuevos ADR: {syncResult.inserted}
-                                </Lozenge>
-
-                                <Lozenge appearance="default">
-                                  Duplicados: {syncResult.duplicates}
-                                </Lozenge>
-                              </Inline>
-
-                              <Text size="small">
-                                Archivos sin cambios: {syncResult.filesUnchanged}
-                              </Text>
-
-                              <Text size="small">
-                                Candidatos detectados: {syncResult.candidatesFound}
-                              </Text>
-
-                              {syncResult.truncated && (
-                                <Text>
-                                  La exploración alcanzó un límite.
-                                  Puedes repetir la sincronización
-                                  para continuar revisando los archivos.
-                                </Text>
-                              )}
-
-                              {syncResult.errors?.length > 0 && (
-                                <Stack space="space.100">
-
-                                  <Text weight="semibold">
-                                    Errores ({syncResult.errors.length})
-                                  </Text>
-
-                                  {syncResult.errors.map((item, index) => (
-                                    <Box
-                                      key={`${item.file}-${index}`}
-                                      padding="space.100"
-                                      backgroundColor="elevation.surface.raised"
-                                      borderRadius="small"
-                                    >
-                                      <Stack space="space.050">
-                                        <Text weight="semibold">
-                                          {item.file}
-                                        </Text>
-                                        <Text size="small">
-                                          {item.message}
-                                        </Text>
-                                      </Stack>
-                                    </Box>
-                                  ))}
-
-                                </Stack>
-                              )}
-
-                            </Stack>
-                          </SectionMessage>
-                        )}
-
-                        {syncError && (
-                          <SectionMessage appearance="error">
-                            <Text>{syncError}</Text>
-                          </SectionMessage>
-                        )}
-
-                      </Stack>
-                    </Box>
-
-                  {/* CONFIGURACIÓN EXPANDIDA */}
-
-                  {showDriveSettings && (
-                    <Stack space="space.300">
-
-                      <Heading size="small">
-                        Seleccionar carpeta
-                      </Heading>
-
-                      {/* CARPETAS RECOMENDADAS */}
-
-                      {preferredLoading ? (
-                        <Spinner size="small" />
-                      ) : (
-                        <Stack space="space.100">
-
-                          <Text weight="semibold">
-                            Carpetas recomendadas
-                          </Text>
-
-                          {preferredFolders.length > 0 ? (
-                            <Inline
-                              space="space.100"
-                              shouldWrap
-                            >
-                              {preferredFolders.map((folder) => (
-                                <Button
-                                  key={folder.id}
-                                  appearance={
-                                    selectedDriveFolder?.id === folder.id
-                                      ? 'primary'
-                                      : 'default'
-                                  }
-                                  isDisabled={drivePreviewLoading}
-                                  onClick={() =>
-                                    handleSelectFolder(folder)
-                                  }
-                                >
-                                  {folder.name}
-                                </Button>
-                              ))}
-                            </Inline>
-                          ) : (
-                            <Text size="small">
-                              No se encontraron carpetas Minerva.
-                            </Text>
-                          )}
-
-                        </Stack>
-                      )}
-
-                      {/* BUSCADOR */}
-
-                      <Stack space="space.100">
-                        <Text weight="semibold">
-                          Buscar otra carpeta
-                        </Text>
-
-                        <Textfield
-                          value={driveQuery}
-                          placeholder="Nombre de la carpeta"
-                          onChange={(event) =>
-                            setDriveQuery(event.target.value)
-                          }
-                        />
-
-                        <Inline space="space.100">
-                          <Button
-                            isDisabled={
-                              driveSearching ||
-                              driveQuery.trim().length < 2
-                            }
-                            onClick={handleSearchFolders}
-                          >
-                            {driveSearching
-                              ? 'Buscando...'
-                              : 'Buscar'}
-                          </Button>
-                        </Inline>
-
-                        {driveMatches.map((folder) => (
-                          <Inline
-                            key={folder.id}
-                            space="space.100"
-                            alignBlock="center"
-                          >
-                            <Button
-                              appearance={
-                                selectedDriveFolder?.id === folder.id
-                                  ? 'primary'
-                                  : 'default'
-                              }
-                              onClick={() =>
-                                handleSelectFolder(folder)
-                              }
-                            >
-                              {folder.name}
-                            </Button>
-                          </Inline>
-                        ))}
-                      </Stack>
-
-                      {/* VISTA PREVIA */}
-
-                      {selectedDriveFolder && (
-                        <Box
-                          padding="space.200"
-                          backgroundColor="elevation.surface.sunken"
-                          borderRadius="medium"
-                        >
-                          <Stack space="space.200">
-
-                            <Text weight="semibold">
-                              {selectedDriveFolder.name}
-                            </Text>
-
-                            {drivePreviewLoading && (
-                              <Inline space="space.100">
-                                <Spinner size="small" />
-                                <Text>
-                                  Explorando archivos...
-                                </Text>
-                              </Inline>
-                            )}
-
-                            {drivePreview && (
-                              <Stack space="space.100">
-
-                                <Inline space="space.100">
-                                  <Lozenge appearance="default">
-                                    {drivePreview.foldersScanned} carpetas
-                                  </Lozenge>
-
-                                  <Lozenge appearance="success">
-                                    {drivePreview.totalMarkdown} Markdown
-                                  </Lozenge>
-                                </Inline>
-
-                                {drivePreview.truncated && (
-                                  <SectionMessage appearance="warning">
-                                    <Text>
-                                      La exploración es parcial.
-                                    </Text>
-                                  </SectionMessage>
-                                )}
-
-                                {drivePreview.files?.map((file) => (
-                                  <Text key={file.id} size="small">
-                                    {file.path}
-                                  </Text>
-                                ))}
-
-                              </Stack>
-                            )}
-
-                            <Button
-                              appearance="primary"
-                              isDisabled={
-                                driveSaving ||
-                                drivePreviewLoading ||
-                                !drivePreview ||
-                                selectedDriveFolder.id ===
-                                  savedDriveFolder?.id
-                              }
-                              onClick={handleSaveFolder}
-                            >
-                              {driveSaving
-                                ? 'Guardando...'
-                                : selectedDriveFolder.id ===
-                                    savedDriveFolder?.id
-                                  ? 'Carpeta guardada'
-                                  : 'Guardar esta carpeta'}
-                            </Button>
-
-                          </Stack>
-                        </Box>
-                      )}
-
-                    </Stack>
-                  )}
-
-                  {driveNotice && (
-                    <SectionMessage appearance="success">
-                      <Text>{driveNotice}</Text>
-                    </SectionMessage>
-                  )}
-
-                  {driveError && (
-                    <SectionMessage appearance="error">
-                      <Text>{driveError}</Text>
-                    </SectionMessage>
-                  )}
-
-                </Stack>
-              )}
-
-              {googleError && (
-                <SectionMessage appearance="error">
-                  <Text>{googleError}</Text>
-                </SectionMessage>
-              )}
-
-            </Stack>
-          )}
-
-        </Stack>
-      </Box>
-
-    </Stack>
+            {driveError && <SectionMessage appearance="error"><Text>{driveError}</Text></SectionMessage>}
+          </Stack>
+        )}
+      </ModalBody>
+      <ModalFooter>
+        <Button appearance="primary" onClick={() => setShowSettings(false)}>Listo</Button>
+      </ModalFooter>
+    </Modal>
   );
 
-  // ==========================================================
-  // INTERFAZ PRINCIPAL
-  // ==========================================================
+  // ============================================================
+  // RENDER
+  // ============================================================
 
   return (
-    <Box padding="space.400">
-      <Stack space="space.400">
+    <Stack space="space.300">
+      {toolbar}
 
-        {/* CABECERA */}
+      {banner && (
+        <SectionMessage appearance={banner.type === 'error' ? 'error' : 'success'} title={banner.title}>
+          <Inline space="space.100" alignBlock="center" shouldWrap>
+            {banner.description && <Text>{banner.description}</Text>}
+            <Button appearance="subtle" spacing="compact" onClick={() => setBanner(null)}>Cerrar</Button>
+          </Inline>
+        </SectionMessage>
+      )}
 
-        <Stack space="space.100">
-          <Heading size="large">Minerva ADR</Heading>
-          <Text>
-            Gestión de decisiones arquitectónicas
-            extraídas desde minutas de reuniones.
-          </Text>
-        </Stack>
+      {loadError && (
+        <SectionMessage appearance="error" title="No se pudieron cargar las decisiones">
+          <Text>{loadError}</Text>
+        </SectionMessage>
+      )}
 
-        {spaceName && (
-          <Lozenge appearance="inprogress">
-            Espacio: {spaceName}
-          </Lozenge>
-        )}
-
-        {/* NAVEGACIÓN */}
-
-        <Inline space="space.100" shouldWrap>
-
-          <Button
-            appearance={
-              view === 'decisions' ? 'primary' : 'default'
-            }
-            onClick={() => setView('decisions')}
-          >
-            Decisiones
-          </Button>
-
-          <Button
-            appearance={
-              view === 'import' ? 'primary' : 'default'
-            }
-            onClick={() => setView('import')}
-          >
-            Incorporar
-          </Button>
-
-          <Button
-            appearance={
-              view === 'settings' ? 'primary' : 'default'
-            }
-            onClick={() => setView('settings')}
-          >
-            Configuración
-          </Button>
-
-        </Inline>
-
-        {/* MENSAJES */}
-
-        {error && (
-          <SectionMessage appearance="error">
-            <Inline space="space.100" shouldWrap>
-              <Text>{error}</Text>
-              <Button
-                appearance="subtle"
-                onClick={() => setError(null)}
-              >
-                Cerrar
-              </Button>
+      {syncReport && (
+        <SectionMessage appearance="warning" title="La sincronización terminó con observaciones">
+          <Stack space="space.100">
+            {syncReport.truncated && <Text>Se alcanzó el límite de exploración; sincroniza de nuevo para continuar.</Text>}
+            {(syncReport.errors || []).map((e, i) => (
+              <Text key={`${e.file}-${i}`} size="small">{`${e.file}: ${e.message}`}</Text>
+            ))}
+            <Inline>
+              <Button appearance="subtle" spacing="compact" onClick={() => setSyncReport(null)}>Cerrar</Button>
             </Inline>
-          </SectionMessage>
-        )}
+          </Stack>
+        </SectionMessage>
+      )}
 
-        {notice && (
-          <SectionMessage appearance="success">
-            <Inline space="space.100" shouldWrap>
-              <Text>{notice}</Text>
-              <Button
-                appearance="subtle"
-                onClick={() => setNotice(null)}
-              >
-                Cerrar
-              </Button>
-            </Inline>
-          </SectionMessage>
-        )}
+      <Tabs id="minerva-tabs" selected={tabIndex} onChange={changeTab}>
+        <TabList>
+          {TABS.map((t) => (
+            <Tab key={t.id}>{`${t.label} (${counts[t.id]})`}</Tab>
+          ))}
+        </TabList>
+        {TABS.map((t, i) => (
+          <TabPanel key={t.id}>
+            <Box paddingBlockStart="space.200" xcss={fullWidth}>
+              {i === tabIndex ? tablePanel : null}
+            </Box>
+          </TabPanel>
+        ))}
+      </Tabs>
 
-        {/* CONTENIDO */}
-
-        {view === 'decisions' && renderDecisions()}
-        {view === 'import' && renderImport()}
-        {view === 'settings' && renderSettings()}
-
-      </Stack>
-    </Box>
+      <ModalTransition>
+        {detailModal}
+        {confirmModal}
+        {importModal}
+        {createModal}
+        {settingsModal}
+      </ModalTransition>
+    </Stack>
   );
 };
 
