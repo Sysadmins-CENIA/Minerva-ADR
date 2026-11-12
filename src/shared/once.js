@@ -9,3 +9,15 @@ export function onceUntilSuccess(fn) {
     return pending;
   };
 }
+
+// Reintenta fn hasta `attempts` veces, esperando delayMs entre intentos.
+export async function retry(fn, attempts, delayMs) {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (i >= attempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
