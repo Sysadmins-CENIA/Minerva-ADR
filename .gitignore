@@ -66,3 +66,7 @@ service-account*.json
 .idea/
 .vscode/
 AGENTS.md
+
+# Material local de diseño y documentación (capturas con datos personales)
+DESIGN-IS-*/
+docs/

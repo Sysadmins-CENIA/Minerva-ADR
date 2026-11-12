@@ -5,7 +5,7 @@ import { dateFromPath } from '../src/shared/dates.js';
 
 test('dateFromPath toma la fecha de una carpeta de la ruta', () => {
   assert.equal(
-    dateFromPath('Minerva/Sin grupo/2026-11-04 – Reunión On Demand 1/Seguimiento de Portafolio y Equipo PM.md'),
+    dateFromPath('Minerva/Sin grupo/2026-11-04 – Reunión de ejemplo/Acta de ejemplo.md'),
     '2026-11-04'
   );
 });

@@ -14,7 +14,7 @@ import {
 
 const active = [
   { id: 'a', title: 'Almacenamiento scratch', job: 'Clústeres', decision_owner: 'José', review_status: 'Pendiente de revisión' },
-  { id: 'b', title: 'Comité de cómputo', job: 'Infra', decision_owner: 'Álvaro Mora', review_status: 'Validado' },
+  { id: 'b', title: 'Comité de cómputo', job: 'Infra', decision_owner: 'Ángela Pérez', review_status: 'Validado' },
   { id: 'c', title: 'Cambio de colas', job: null, decision_owner: null, review_status: 'Descartado' },
 ];
 const archived = [{ id: 'z', title: 'Vieja', review_status: 'Validado' }];
@@ -33,7 +33,7 @@ test('filterDecisions filtra por pestaña', () => {
 
 test('filterDecisions busca sin distinguir mayúsculas ni acentos en título, proyecto y responsable', () => {
   assert.deepEqual(filterDecisions(active, archived, 'all', 'COMPUTO').map((d) => d.id), ['b']);
-  assert.deepEqual(filterDecisions(active, archived, 'all', 'alvaro').map((d) => d.id), ['b']);
+  assert.deepEqual(filterDecisions(active, archived, 'all', 'angela').map((d) => d.id), ['b']);
   assert.deepEqual(filterDecisions(active, archived, 'all', 'clusteres').map((d) => d.id), ['a']);
 });
 
