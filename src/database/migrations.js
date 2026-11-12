@@ -1,5 +1,6 @@
 
 import { migrationRunner } from '@forge/sql';
+import { onceUntilSuccess } from '../shared/once.js';
 
 // ============================================================
 // V001 - TABLA PRINCIPAL DE CANDIDATOS ADR
@@ -245,3 +246,6 @@ export const runMigration = async () => {
   }
 };
 
+
+// Una vez por contenedor, antes de la primera llamada al resolver.
+export const ensureMigrations = onceUntilSuccess(runMigration);

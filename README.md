@@ -150,7 +150,7 @@ Tablas principales:
 
 El aislamiento lógico entre espacios utiliza `space_id`.
 
-Las migraciones SQL se ejecutan mediante un disparador programado de Forge.
+Las migraciones SQL se aplican solas en la primera llamada al resolver de cada contenedor (`ensureMigrations`), tanto en instalaciones nuevas como después de cada despliegue. No hace falta activar ningún disparador.
 
 ## Limitaciones y tareas pendientes
 
